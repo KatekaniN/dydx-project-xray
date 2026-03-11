@@ -1,0 +1,14 @@
+# ===========================================
+# requirements.txt — Python Package Dependencies
+# ===========================================
+# This file lists all the external Python packages this project needs.
+# Install them with:  pip install -r requirements.txt
+#
+# The "==" pins exact versions to ensure reproducible builds.
+# Without pinning, "pip install Flask" might install a different version
+# on different machines, potentially breaking things.
+
+Flask==3.0.0           # Web framework — handles HTTP requests, creates the webhook server
+requests==2.31.0       # HTTP client — makes API calls to Pipefy and SolarWinds
+python-dotenv==1.0.0   # Reads .env files and loads values as environment variables
+gunicorn==21.2.0       # Production WSGI server — replaces Flask's dev server in production
