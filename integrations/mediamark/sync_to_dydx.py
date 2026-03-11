@@ -994,9 +994,11 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         existing_card = self.find_dydx_card_for_assignee(source_card_id, assignee_id)
         if existing_card:
-            logger.info(f" DYDX card already exists for {source_card_id}:{assignee_id} → {existing_card['id']}")
-            self._sync_card_fields(existing_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id)
-            return existing_card
+            raise ValueError(
+                f"DYDX card already exists for source card {source_card_id} "
+                f"(assignee {assignee_id}) → existing DYDX card {existing_card['id']}. "
+                f"No new card created."
+            )
         
         dydx_assignee_id, dydx_assignee_name = self._resolve_dydx_assignee(source_card, assignee_id)
         if not dydx_assignee_id:

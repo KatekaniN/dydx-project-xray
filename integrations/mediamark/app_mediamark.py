@@ -137,6 +137,10 @@ else:
 # All Mediamark cards come from this one board.
 SUPPORT_BOARD_PIPE_ID = os.getenv('MEDIAMARK_SUPPORT_BOARD_PIPE_ID')
 
+# Debug/test endpoints are disabled in production.
+# Set ENABLE_DEBUG_ENDPOINTS=true in .env to re-enable (development only).
+ENABLE_DEBUG_ENDPOINTS = os.getenv('ENABLE_DEBUG_ENDPOINTS', 'false').lower() == 'true'
+
 # ==========================================
 # JOB TRACKER
 # ==========================================
@@ -340,10 +344,9 @@ def handle_pipefy_webhook():
 
 # TEST ENDPOINT
 
-@app.route('/webhook/test', methods=['POST']) # A test endpoint to trigger syncs manually without waiting for a real webhook. 
+@app.route('/webhook/test', methods=['POST'])
 def test_webhook():
-    """
-    Manual test endpoint — trigger a sync without waiting for Pipefy.
+    """Manual test endpoint — disabled in production. Set ENABLE_DEBUG_ENDPOINTS=true to use.
     
     POST body:
     {
@@ -353,6 +356,8 @@ def test_webhook():
         "current_phase": "In Progress"
     }
     """
+    if not ENABLE_DEBUG_ENDPOINTS:
+        return jsonify({'status': 'disabled', 'message': 'Debug endpoints are disabled in production.'}), 403
     try:
         data = request.get_json(silent=True)
         if not isinstance(data, dict):
@@ -436,13 +441,17 @@ def recent_jobs():
 
 @app.route('/webhook/debug', methods=['POST'])
 def debug_webhook():
-    """Accepts any POST and logs it — useful for testing webhook delivery."""
+    """Accepts any POST and logs it — disabled in production."""
+    if not ENABLE_DEBUG_ENDPOINTS:
+        return jsonify({'status': 'disabled', 'message': 'Debug endpoints are disabled in production.'}), 403
     return jsonify({'status': 'logged'}), 200
 
 
 @app.route('/debug/card/<card_id>', methods=['GET'])
 def debug_card(card_id):
-    """Inspect what fields are extracted from a Mediamark source card."""
+    """Inspect fields extracted from a Mediamark source card — disabled in production."""
+    if not ENABLE_DEBUG_ENDPOINTS:
+        return jsonify({'status': 'disabled', 'message': 'Debug endpoints are disabled in production.'}), 403
     try:
         source_data = sync_service.clients.mediamark_client.get_card(card_id)
         source_card = source_data['data']['card']
@@ -541,7 +550,9 @@ def listener_force_check():
 
 @app.route('/listener/sync/<card_id>', methods=['POST'])
 def listener_sync_card(card_id):
-    """Force sync a specific Mediamark card immediately."""
+    """Force sync a specific Mediamark card immediately — disabled in production."""
+    if not ENABLE_DEBUG_ENDPOINTS:
+        return jsonify({'status': 'disabled', 'message': 'Debug endpoints are disabled in production.'}), 403
     try:
         board_type = request.args.get('board_type', 'change_request')
         result = sync_service._handle_field_update(card_id, board_type)
