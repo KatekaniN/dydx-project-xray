@@ -207,7 +207,7 @@ def extract_phase_info(data: dict) -> Tuple[str, str]:
     previous_phase = None
 
     raw_data = data.get('data', {}) # The "data" field in the webhook payload contains the main event information, including the card and its current phase. We start by getting this "data" object, which is where Pipefy puts the details of the card that triggered the webhook.
-    card_data = raw_data.get('card', {}) # Within the "data" object, there is a "card" field that contains information about the card that triggered the webhook. We access this "card" object to get details about the card, including its current phase.
+    card_data = raw_data.get('card', {}) or data.get('card', {}) # Card may be inside data.data OR at the top level depending on Pipefy's format
 
     current_phase_obj = card_data.get('current_phase', {}) 
     if current_phase_obj:
@@ -289,24 +289,28 @@ def handle_pipefy_webhook():
         if not data:
             return jsonify({'status': 'ok', 'message': 'No data found'}), 200
 
-        action = data.get('action')
+        # action: Pipefy puts it inside data.data, but also check top-level for safety
+        action = data.get('action') or data.get('data', {}).get('action')
 
-        if not action and request.form and 'payload' in request.form: # Some Pipefy webhooks send data as form-encoded with a "payload" field containing the JSON string. We check for this case and attempt to parse it.
+        if not action and request.form and 'payload' in request.form:
             try:
                 data = json.loads(request.form['payload'])
-                action = data.get('action')
+                action = data.get('action') or data.get('data', {}).get('action')
             except:
                 pass
 
         if not action:
             return jsonify({'status': 'ok', 'message': 'Test webhook received'}), 200
 
-        # Extract card and pipe identifiers
-        raw_data_obj = data.get('data', {})
-        card_data = raw_data_obj.get('card', {})
+        # Extract card — Pipefy sends card at the TOP LEVEL, but also check inside data.data for older formats
+        card_data = data.get('card', {}) or data.get('data', {}).get('card', {})
         card_id = card_data.get('id')
-        pipe_data = card_data.get('pipe', {})
-        pipe_id = pipe_data.get('id')
+
+        # pipe_id — Pipefy sends it as a direct field (e.g. "pipe_id": "Tb2mWWYy") or nested pipe.id
+        pipe_id = (
+            card_data.get('pipe_id')
+            or card_data.get('pipe', {}).get('id')
+        )
 
         if not card_id:
             logger.error('No card ID in webhook payload')
@@ -317,9 +321,10 @@ def handle_pipefy_webhook():
         logger.info(f" [Mediamark] Received: card_id={card_id}, pipe_id={pipe_id}, action={action}")
         logger.info(f" Phases: current='{current_phase}', previous='{previous_phase}'")
 
-        # Since all Mediamark cards come from the single "Workflow Support" board. The sync engine internally checks the "Support request type" field to determine if a card is a CR or support ticket.
-        if str(pipe_id) == str(SUPPORT_BOARD_PIPE_ID):
-            # Return 200 immediately so Pipefy doesn't retry — process in background.
+        # Since the webhook is registered only on the Mediamark support pipe, any event
+        # with a valid card_id is from that pipe — process it regardless of pipe_id encoding.
+        # (Pipefy may send pipe_id as a numeric string OR a base64-encoded global ID.)
+        if card_id:
             job_id = _create_job(card_id, action)
             def _process(jid=job_id):
                 try:
@@ -338,7 +343,7 @@ def handle_pipefy_webhook():
             return jsonify({'status': 'accepted', 'card_id': card_id, 'job_id': job_id}), 200
 
         else:
-            logger.info(f"Unknown Mediamark pipe ID: {pipe_id}") # If the pipe ID from the webhook doesn't match the known Workflow Support board, we log this as an unknown pipe and ignore the webhook.
+            logger.warning(f"No card ID found in payload, ignoring.")
             return jsonify({'status': 'ignored'}), 200
 
     except Exception as e:
