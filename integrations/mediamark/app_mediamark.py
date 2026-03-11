@@ -259,6 +259,10 @@ def handle_pipefy_webhook():
         if request.method == 'GET':
             return jsonify({'status': 'ok'}), 200
 
+        # Log raw payload so we can see exactly what Pipefy sends
+        raw_body = request.get_data(as_text=True)
+        logger.info(f"[Mediamark] Raw payload ({len(raw_body)} bytes): {raw_body[:2000]}")
+
         data = None
 
         # Attempt 1: Standard JSON parsing
@@ -269,7 +273,7 @@ def handle_pipefy_webhook():
 
         # Attempt 2: Manual repair
         if not data:
-            raw_data = request.get_data(as_text=True) # Get the raw request data as text. This is useful if the JSON is malformed and cannot be parsed by Flask's standard JSON parser.
+            raw_data = raw_body  # already read above
             if raw_data:
                 try:
                     data = json.loads(raw_data)
