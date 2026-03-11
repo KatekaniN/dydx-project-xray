@@ -249,7 +249,7 @@ def sanitize_json_keys(text):
 # MAIN WEBHOOK ENDPOINT
 
 
-@app.route('/webhook/pipefy', methods=['POST', 'GET'])
+@app.route('/mediamark/events', methods=['POST', 'GET'])
 def handle_pipefy_webhook():
     """
     Main webhook handler — receives events from Mediamark's Pipefy boards
@@ -604,6 +604,6 @@ def close_single_card(dydx_card_id):
 
 
 if __name__ == '__main__':
-    port = int(os.getenv('FLASK_PORT', 5001))
+    port = int(os.getenv('FLASK_PORT', 8472))
     debug = os.getenv('FLASK_DEBUG', '0').lower() in ('1', 'true')
     app.run(host='0.0.0.0', port=port, debug=debug)

@@ -109,7 +109,7 @@ gunicorn -c gunicorn_config.py integrations.mediamark.app_mediamark:app
 In the Mediamark Pipefy board settings, add a webhook pointing to:
 
 ```
-http://<your-server-ip>:5001/webhook/pipefy
+http://<your-server-ip>:8472/mediamark/events
 ```
 
 Events to enable: `card.create`, `card.move`, `card.field_update`, `card.done`
@@ -118,16 +118,16 @@ Events to enable: `card.create`, `card.move`, `card.field_update`, `card.done`
 
 ## API endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Health check — returns `{"status": "healthy"}` |
-| GET | `/` | Service info |
-| POST | `/webhook/pipefy` | Main Pipefy webhook receiver |
-| POST | `/webhook/test` | Manually trigger a sync (for testing) |
-| GET | `/status` | List the 20 most recent background jobs |
-| GET | `/status/<job_id>` | Check the status of a specific job |
-| GET | `/webhook/debug` | Accepts any POST and logs it |
-| GET | `/debug/card/<card_id>` | Inspect fields extracted from a Mediamark card |
+| Method | Endpoint                | Description                                    |
+| ------ | ----------------------- | ---------------------------------------------- |
+| GET    | `/health`               | Health check — returns `{"status": "healthy"}` |
+| GET    | `/`                     | Service info                                   |
+| POST   | `/mediamark/events`     | Main Pipefy webhook receiver                   |
+| POST   | `/webhook/test`         | Manually trigger a sync (for testing)          |
+| GET    | `/status`               | List the 20 most recent background jobs        |
+| GET    | `/status/<job_id>`      | Check the status of a specific job             |
+| GET    | `/webhook/debug`        | Accepts any POST and logs it                   |
+| GET    | `/debug/card/<card_id>` | Inspect fields extracted from a Mediamark card |
 
 ### Manually trigger a sync (`/webhook/test`)
 
@@ -154,6 +154,7 @@ GET http://localhost:5001/status/a3f2c1d0-...
 ```
 
 Response:
+
 ```json
 {
   "job_id": "a3f2c1d0-...",
@@ -175,30 +176,30 @@ Response:
 
 The DYDX card title is built as `[{Request Type}] {Description}` where the prefix is the exact request type name from the Mediamark card:
 
-| Mediamark request type | Example DYDX title |
-|---|---|
-| Issue/Question | `[Issue/Question] Login page is not loading` |
-| Feature/Change Request | `[Feature/Change Request] Add export to CSV` |
+| Mediamark request type          | Example DYDX title                                     |
+| ------------------------------- | ------------------------------------------------------ |
+| Issue/Question                  | `[Issue/Question] Login page is not loading`           |
+| Feature/Change Request          | `[Feature/Change Request] Add export to CSV`           |
 | Access To System (For Yourself) | `[Access To System (For Yourself)] Jane Doe - Finance` |
-| New User Request | `[New User Request] Card title` |
+| New User Request                | `[New User Request] Card title`                        |
 
 ---
 
 ## Phase mapping
 
-| Mediamark phase | DYDX phase |
-|---|---|
-| New | Backlog |
-| Review | In Progress |
-| Escalated | In Progress |
-| SOW and Scoping | In Progress |
-| Client Approval | In Progress |
-| Backlog | Backlog |
-| In Progress | In Progress |
-| Comms to Client | Testing / Comms |
-| Resolved | Done |
-| Not Approved | Cancelled |
-| Change Request On Hold | Backlog |
+| Mediamark phase        | DYDX phase      |
+| ---------------------- | --------------- |
+| New                    | Backlog         |
+| Review                 | In Progress     |
+| Escalated              | In Progress     |
+| SOW and Scoping        | In Progress     |
+| Client Approval        | In Progress     |
+| Backlog                | Backlog         |
+| In Progress            | In Progress     |
+| Comms to Client        | Testing / Comms |
+| Resolved               | Done            |
+| Not Approved           | Cancelled       |
+| Change Request On Hold | Backlog         |
 
 ---
 
@@ -218,26 +219,18 @@ Disable it by setting `ENABLE_CARD_LISTENER=false` in the env file.
 ## Logging
 
 All sync activity is logged to:
+
 - **Console** — always on, useful for local development
 - **SolarWinds / Papertrail** — when `SOLARWINDS_LOG_URL` and `SOLARWINDS_TOKEN` are set
 
 Each log line includes a timestamp and the module name, e.g.:
+
 ```
 2026-03-11T10:00:01 [integrations.mediamark.sync_to_dydx] INFO Created DYDX card for card 1309710645
 ```
 
 Test the Papertrail connection:
+
 ```bash
 python test_logging.py
 ```
-
----
-
-## Utility scripts
-
-| Script | Purpose |
-|---|---|
-| `test_logging.py` | Verify SolarWinds/Papertrail token and connectivity |
-| `test_phase_movements.py` | Test phase mapping by moving a card through all phases |
-| `integrations/mediamark/test_connection_mediamark.py` | Verify Pipefy API keys and board access |
-| `integrations/mediamark/move_mediamark_card.py` | Move a Mediamark card to a specific phase manually |

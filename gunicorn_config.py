@@ -1,7 +1,7 @@
 import os
 
 # Bind to all interfaces on the configured port
-port = os.getenv('FLASK_PORT', '5001')
+port = os.getenv('FLASK_PORT', '8472')
 bind = f"0.0.0.0:{port}"
 
 # Number of worker processes
