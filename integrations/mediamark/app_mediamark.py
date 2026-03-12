@@ -46,6 +46,41 @@ else:
 
 log_queue = queue.Queue()
 
+# Thread-local storage for per-job logging context (card_id, job_ref).
+# Set at the start of each background job so all log calls within that thread
+# (including from sync_to_dydx.py) automatically carry the card reference.
+_log_context = threading.local()
+
+
+def set_log_context(card_id: str, job_ref: str):
+    """Set card_id and job_ref on the current thread for structured Papertrail logs."""
+    _log_context.card_id = str(card_id)
+    _log_context.job_ref = job_ref
+
+
+def clear_log_context():
+    """Clear log context after a job finishes."""
+    _log_context.card_id = None
+    _log_context.job_ref = None
+
+
+class PapertrailFormatter(logging.Formatter):
+    """Formats log records to match the team's Papertrail convention:
+       mediamark_dydx_sync: {job_ref}, card_id {card_id} : {message}
+    Papertrail prepends the timestamp automatically, so we omit it here.
+    """
+    IDENTIFIER = 'mediamark_dydx_sync'
+
+    def format(self, record):
+        card_id = getattr(_log_context, 'card_id', None)
+        job_ref = getattr(_log_context, 'job_ref', None)
+        msg = record.getMessage()
+        if record.exc_info:
+            msg = msg + '\n' + self.formatException(record.exc_info)
+        if card_id and job_ref:
+            return f"{self.IDENTIFIER}: {job_ref}, card_id {card_id} : {msg}"
+        return f"{self.IDENTIFIER}: {msg}"
+
 
 class SolarWindsWorker(threading.Thread): # inherits from threading.Thread to run in the background
     """Background thread that sends log messages to SolarWinds."""
@@ -63,7 +98,7 @@ class SolarWindsWorker(threading.Thread): # inherits from threading.Thread to ru
         while True:
             try:
                 record = log_queue.get()
-                self.session.post(self.url, data=record.encode('utf-8'), timeout=5) #post the log message to SolarWinds url, encode the string as bytes, set a timeout to prevent hanging
+                self.session.post(self.url, data=record.encode('utf-8'), timeout=5)
                 log_queue.task_done()
             except Exception:
                 pass
@@ -96,11 +131,7 @@ if SW_LOG_URL and SW_API_TOKEN:
         worker = SolarWindsWorker(SW_LOG_URL, SW_API_TOKEN)
         worker.start()
         sw_handler = QueueHandler()
-        sw_formatter = logging.Formatter(
-            '%(asctime)s [%(name)s] %(levelname)s %(message)s',
-            datefmt='%Y-%m-%dT%H:%M:%S'
-        )
-        sw_handler.setFormatter(sw_formatter)
+        sw_handler.setFormatter(PapertrailFormatter())  # Papertrail adds timestamp; we format as: mediamark_dydx_sync: {job_ref}, card_id {card_id} : {message}
         logger.addHandler(sw_handler)
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)  # Ensure INFO logs from all modules (sync_to_dydx, card_listener, etc.) propagate to SolarWinds.
@@ -319,16 +350,21 @@ def handle_pipefy_webhook():
 
         current_phase, previous_phase = extract_phase_info(data)
 
-        logger.info(f" [Mediamark] Received: card_id={card_id}, pipe_id={pipe_id}, action={action}")
-        logger.info(f" Phases: current='{current_phase}', previous='{previous_phase}'")
+        # Generate a 9-digit time-based job reference (HHMMSSMMM) matching team's Papertrail convention
+        _now = datetime.utcnow()
+        job_ref = _now.strftime('%H%M%S') + str(_now.microsecond // 1000).zfill(3)
+
+        logger.info(f"mediamark_dydx_sync: {job_ref}, card_id {card_id} : Webhook received: action={action}, phase='{current_phase}'")
 
         # Since the webhook is registered only on the Mediamark support pipe, any event
         # with a valid card_id is from that pipe — process it regardless of pipe_id encoding.
         # (Pipefy may send pipe_id as a numeric string OR a base64-encoded global ID.)
         if card_id:
             job_id = _create_job(card_id, action)
-            def _process(jid=job_id):
+            def _process(jid=job_id, jref=job_ref):
+                set_log_context(card_id, jref)
                 try:
+                    logger.info(f"Sync started: action={action}")
                     result = sync_service.process_support_webhook(
                         source_card_id=card_id,
                         action=action,
@@ -336,10 +372,12 @@ def handle_pipefy_webhook():
                         previous_phase=previous_phase
                     )
                     _finish_job(jid, result=result)
-                    logger.info(f"Job {jid} completed for card {card_id}")
+                    logger.info(f"Sync completed")
                 except Exception as bg_err:
                     _finish_job(jid, error=str(bg_err))
-                    logger.error(f"Job {jid} failed for card {card_id}: {bg_err}", exc_info=True)
+                    logger.error(f"Sync failed: {bg_err}", exc_info=True)
+                finally:
+                    clear_log_context()
             threading.Thread(target=_process, daemon=True).start()
             return jsonify({'status': 'accepted', 'card_id': card_id, 'job_id': job_id}), 200
 
