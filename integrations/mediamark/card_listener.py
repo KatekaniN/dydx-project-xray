@@ -268,7 +268,11 @@ class MediamarkCardChangeListener:
             try:
                 changes = self._check_for_changes()
                 for change in changes:
-                    self._process_change(change)
+                    try:
+                        self._process_change(change)
+                    except ValueError as e:
+                        # Webhook already processed this change — not an error.
+                        logger.debug(f"Poll skipped (webhook already handled): {e}")
             except Exception as e:
                 logger.error(f"Error in Mediamark poll loop: {e}", exc_info=True)
             time.sleep(self.poll_interval)

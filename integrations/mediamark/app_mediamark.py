@@ -132,10 +132,12 @@ if SW_LOG_URL and SW_API_TOKEN:
         worker.start()
         sw_handler = QueueHandler()
         sw_handler.setFormatter(PapertrailFormatter())  # Papertrail adds timestamp; we format as: mediamark_dydx_sync: {job_ref}, card_id {card_id} : {message}
-        logger.addHandler(sw_handler)
+        # Add sw_handler only to root logger so all modules (sync_to_dydx, card_listener, etc.)
+        # ship logs to Papertrail via natural propagation — avoids double-sending.
         root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)  # Ensure INFO logs from all modules (sync_to_dydx, card_listener, etc.) propagate to SolarWinds.
-        root_logger.addHandler(sw_handler)  # Also add to root logger to capture logs from other modules.
+        root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(sw_handler)
+        logger.propagate = True  # ensure app_mediamark logs propagate to root
     except Exception as e:
         logger.error(f"Failed to setup SolarWinds logging: {e}")
 
@@ -172,6 +174,30 @@ SUPPORT_BOARD_PIPE_ID = os.getenv('MEDIAMARK_SUPPORT_BOARD_PIPE_ID')
 # Debug/test endpoints are disabled in production.
 # Set ENABLE_DEBUG_ENDPOINTS=true in .env to re-enable (development only).
 ENABLE_DEBUG_ENDPOINTS = os.getenv('ENABLE_DEBUG_ENDPOINTS', 'false').lower() == 'true'
+
+# ==========================================
+# WEBHOOK DEDUP
+# Pipefy sometimes fires the same webhook twice within milliseconds.
+# Track (card_id, action) with a short TTL to drop the duplicate.
+# ==========================================
+_webhook_dedup: OrderedDict = OrderedDict()  # (card_id, action) -> timestamp
+_webhook_dedup_lock = threading.Lock()
+_WEBHOOK_DEDUP_TTL = 5  # seconds
+
+
+def _is_duplicate_webhook(card_id: str, action: str) -> bool:
+    key = (str(card_id), action)
+    now = datetime.now(timezone.utc).timestamp()
+    with _webhook_dedup_lock:
+        if key in _webhook_dedup and now - _webhook_dedup[key] < _WEBHOOK_DEDUP_TTL:
+            return True
+        _webhook_dedup[key] = now
+        # Evict entries older than TTL to keep dict small
+        stale = [k for k, t in _webhook_dedup.items() if now - t >= _WEBHOOK_DEDUP_TTL]
+        for k in stale:
+            del _webhook_dedup[k]
+    return False
+
 
 # ==========================================
 # JOB TRACKER
@@ -291,9 +317,10 @@ def handle_pipefy_webhook():
         if request.method == 'GET':
             return jsonify({'status': 'ok'}), 200
 
-        # Log raw payload so we can see exactly what Pipefy sends
+        # Log raw payload to console only (too verbose for Papertrail)
         raw_body = request.get_data(as_text=True)
-        logger.info(f"[Mediamark] Raw payload ({len(raw_body)} bytes): {raw_body[:2000]}")
+        console_handler.stream.write(f"[Mediamark] Raw payload ({len(raw_body)} bytes): {raw_body[:2000]}\n")
+        console_handler.stream.flush()
 
         data = None
 
@@ -348,13 +375,18 @@ def handle_pipefy_webhook():
             logger.error('No card ID in webhook payload')
             return jsonify({'status': 'error', 'message': 'Missing card ID'}), 200
 
+        # Drop duplicate webhook fires from Pipefy (same card+action within 5s)
+        if _is_duplicate_webhook(card_id, action):
+            logger.debug(f"Duplicate webhook ignored: card_id={card_id}, action={action}")
+            return jsonify({'status': 'ok', 'message': 'duplicate'}), 200
+
         current_phase, previous_phase = extract_phase_info(data)
 
         # Generate a 9-digit time-based job reference (HHMMSSMMM) matching team's Papertrail convention
         _now = datetime.now(timezone.utc)
         job_ref = _now.strftime('%H%M%S') + str(_now.microsecond // 1000).zfill(3)
 
-        logger.info(f"mediamark_dydx_sync: {job_ref}, card_id {card_id} : Webhook received: action={action}, phase='{current_phase}'")
+        logger.info(f"Webhook received: action={action}, phase='{current_phase}'")
 
         # Since the webhook is registered only on the Mediamark support pipe, any event
         # with a valid card_id is from that pipe — process it regardless of pipe_id encoding.
