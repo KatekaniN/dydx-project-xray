@@ -52,11 +52,12 @@ class SolarWindsWorker(threading.Thread): # inherits from threading.Thread to ru
     def __init__(self, url, token): # constructor takes the SolarWinds URL and API token
         super().__init__(daemon=True) # run threading from the parent class, set as daemon so it doesn't block app shutdown
         self.url = url
+        self.token = token
         self.session = requests.Session()
         self.session.headers.update({
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/octet-stream" # SolarWinds expects raw bytes, not JSON. We encode log messages as UTF-8 bytes before sending.
+            "Content-Type": "text/plain; charset=utf-8"
         })
+        self.session.auth = ('', token)  # Basic auth: empty username, token as password
 
     def run(self): 
         while True:
