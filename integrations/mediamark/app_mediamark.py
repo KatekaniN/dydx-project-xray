@@ -25,7 +25,7 @@ import requests
 import threading
 import queue
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, '..', '..'))
@@ -192,7 +192,7 @@ def _create_job(card_id: str, action: str) -> str:
             'status': 'running',
             'card_id': card_id,
             'action': action,
-            'started_at': datetime.utcnow().isoformat() + 'Z',
+            'started_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             'finished_at': None,
             'result': None,
             'error': None,
@@ -205,7 +205,7 @@ def _finish_job(job_id: str, result=None, error: str = None):
     with _job_store_lock:
         if job_id in _job_store:
             _job_store[job_id]['status'] = 'failed' if error else 'completed'
-            _job_store[job_id]['finished_at'] = datetime.utcnow().isoformat() + 'Z'
+            _job_store[job_id]['finished_at'] = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             _job_store[job_id]['result'] = result
             _job_store[job_id]['error'] = error
 
@@ -351,7 +351,7 @@ def handle_pipefy_webhook():
         current_phase, previous_phase = extract_phase_info(data)
 
         # Generate a 9-digit time-based job reference (HHMMSSMMM) matching team's Papertrail convention
-        _now = datetime.utcnow()
+        _now = datetime.now(timezone.utc)
         job_ref = _now.strftime('%H%M%S') + str(_now.microsecond // 1000).zfill(3)
 
         logger.info(f"mediamark_dydx_sync: {job_ref}, card_id {card_id} : Webhook received: action={action}, phase='{current_phase}'")

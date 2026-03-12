@@ -7,7 +7,7 @@ import time
 import json
 import threading
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Set, Tuple
 from utils.pipefy_client import PipefyClient
 
@@ -1027,7 +1027,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         if source_created_at:
             date_added_to_board = source_created_at.replace('Z', '').split('.')[0]
         else:
-            date_added_to_board = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S')
+            date_added_to_board = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
 
         # Assemble field values for DYDX card
         dydx_fields = [
@@ -1102,7 +1102,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             logger.warning(f"Failed to update test_environment: {e}")
 
         try:
-            today_str = datetime.utcnow().strftime("%Y-%m-%dT09:00:00Z")
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT09:00:00Z")
             self.clients.dydx_client.update_card_field(dydx_card_id, 'estimated_completion_date', today_str)
         except Exception: pass
         
