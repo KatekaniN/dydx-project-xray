@@ -159,20 +159,16 @@ SYSTEM_FIELD_PATTERNS = [
 
 CHANGE_REQUEST_TO_DYDX_MAPPING = {
     'feature_request':              'task_description',
-    'system':                       'system_name',
     'priority':                     'priority',
     'expected_date':                'due_date',
     'additional_information':       'additional_info',
     'link_to_issue':                'link_to_issue',
-    'support_request_type_1':       'request_type',
 }
 
 SUPPORT_TO_DYDX_MAPPING = {
     'issues_question':              'task_description',
-    'system':                       'system_name',
     'priority':                     'priority',
     'expected_date':                'due_date',
     'additional_information':       'additional_info',
     'link_to_issue':                'link_to_issue',
-    'support_request_type_1':       'request_type',
 }

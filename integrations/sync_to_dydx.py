@@ -13,7 +13,7 @@ from utils.pipefy_client import PipefyClient
 
 from integrations.field_mappings import (
     CHANGE_REQUEST_TO_DYDX_MAPPING, SUPPORT_TO_DYDX_MAPPING,
-    HARDCODED_CLIENT_NAME, HARDCODED_PARTNER, HARDCODED_PARTNER_ID, HARDCODED_SYSTEM_TYPE,
+    HARDCODED_CLIENT_NAME, HARDCODED_PARTNER_ID, HARDCODED_SYSTEM_TYPE,
     PROJECT_NAME_PREFIX, TITLE_PREFIX_CR, TITLE_PREFIX_SUPPORT,
     CR_DESCRIPTION_FIELD_PATTERNS, SUPPORT_DESCRIPTION_FIELD_PATTERNS,
     TYPE_OF_REQUEST_FIELD_PATTERNS, SYSTEM_FIELD_PATTERNS,
@@ -21,8 +21,6 @@ from integrations.field_mappings import (
 )
 
 logger = logging.getLogger(__name__)
-
-UNSUPPORTED_DYDX_SYNC_FIELDS = {'system_name', 'request_type'}
 
 class MediamarkSync:
     """
@@ -863,9 +861,10 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             cards(pipe_id: $pipeId, first: 50, after: $after) { 
                 pageInfo { hasNextPage endCursor }
                 edges { node { 
-                    id title url createdAt 
+                    id title url createdAt due_date
                     current_phase { id name } 
                     assignees { id name email }
+                    labels { id name }
                     fields { field { id } value } 
                 } } 
             } 
@@ -1112,191 +1111,132 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         })
     
     def _update_phase_tracking(self, dydx_card_id: str, source_card: Dict) -> None:
-        """Phase tracking fields are only set on create; later updates are not editable on the board."""
-        return
+        """Update only the phase tracking fields on a DYDX card (lightweight, used on moves).
+        
+        NOTE: main_task_status_name/id are phase-locked on the DYDX board — they can only be
+        written on the phase where the card was created. Updates after a move will silently fail.
+        """
+        phase_name = source_card.get('current_phase', {}).get('name')
+        phase_id = source_card.get('current_phase', {}).get('id')
+        if phase_name:
+            try:
+                self.dydx_client.update_card_field(dydx_card_id, 'main_task_status_name', phase_name)
+            except Exception as e:
+                if 'only editable on its original phase' in str(e):
+                    logger.debug(f"Phase-locked field main_task_status_name skipped for DYDX card {dydx_card_id}")
+                else:
+                    logger.warning(f"Failed to update main_task_status_name on DYDX card {dydx_card_id}: {e}")
+        if phase_id:
+            try:
+                self.dydx_client.update_card_field(dydx_card_id, 'main_task_status_id', phase_id)
+            except Exception as e:
+                if 'only editable on its original phase' in str(e):
+                    logger.debug(f"Phase-locked field main_task_status_id skipped for DYDX card {dydx_card_id}")
+                else:
+                    logger.warning(f"Failed to update main_task_status_id on DYDX card {dydx_card_id}: {e}")
 
-    def _get_dydx_card_state(self, dydx_card_id: str) -> Dict[str, Any]:
-        """Fetch the current DYDX card state once so sync can be diff-based instead of blind writes."""
-        result = self.dydx_client.get_card(dydx_card_id)
-        return result.get('data', {}).get('card', {})
-
-    def _normalize_field_value(self, value: Any) -> str:
-        if value is None:
-            return ''
-        if isinstance(value, dict):
-            return json.dumps(value, sort_keys=True)
-        if isinstance(value, list):
-            return json.dumps(value, sort_keys=True)
-
-        text = str(value).strip()
-        if text.lower() in {'null', 'none'}:
-            return ''
-        return text
-
-    def _field_value_matches(self, current_value: Any, desired_value: Any, aliases: Optional[List[Any]] = None) -> bool:
-        current_normalized = self._normalize_field_value(current_value).lower()
-        candidate_values = [desired_value]
-        if aliases:
-            candidate_values.extend(aliases)
-
-        expected_values = {
-            self._normalize_field_value(candidate).lower()
-            for candidate in candidate_values
-            if candidate is not None
-        }
-        return current_normalized in expected_values
-
-    def _priority_comparison_values(self, priority_value: Optional[str]) -> List[str]:
-        if not priority_value:
-            return []
-
-        reverse_priority_labels = {value: key for key, value in self.priority_labels.items()}
-        priority_key = reverse_priority_labels.get(str(priority_value), '')
-        display_map = {
-            'low': 'Low',
-            'high': 'High',
-            'very_high': 'Very High',
-            'on_hold': 'On Hold',
-        }
-
-        values = [str(priority_value)]
-        if priority_key:
-            values.extend([priority_key, display_map.get(priority_key, priority_key)])
-        return values
-
-    def _update_field_if_changed(self, dydx_card_id: str, current_fields: Dict[str, Any], field_id: str, desired_value: Any,
-                                 *, aliases: Optional[List[Any]] = None, error_prefix: str = 'Failed to sync field') -> None:
-        if self._field_value_matches(current_fields.get(field_id), desired_value, aliases=aliases):
-            return
-
-        try:
-            self.dydx_client.update_card_field(dydx_card_id, field_id, desired_value)
-        except Exception as e:
-            logger.error(f"{error_prefix} {field_id} for DYDX card {dydx_card_id}: {e}")
-
-    def _sync_card_fields(self, dydx_card_id: str, source_card: Dict, field_values: Dict, board_type: str, target_assignee_id: Optional[str] = None) -> None:
+    def _sync_card_fields(self, dydx_card_id: str, source_card: Dict, field_values: Dict, board_type: str, target_assignee_id: Optional[str] = None, dydx_card: Dict = None) -> None:
         """
         Sync fields from Mediamark source card to DYDX card.
+        Only updates fields whose values have actually changed (diff-based).
         
         MEDIAMARK-SPECIFIC: Also syncs client name, project name, system type.
         """
-        try:
-            dydx_card = self._get_dydx_card_state(dydx_card_id)
-        except Exception as e:
-            logger.error(f"Failed to fetch current DYDX card state for {dydx_card_id}: {e}")
-            return
-
-        current_fields = {
-            field.get('field', {}).get('id'): field.get('value')
-            for field in dydx_card.get('fields', [])
-            if field.get('field', {}).get('id')
-        }
-        current_assignee_ids = {
-            str(assignee.get('id'))
-            for assignee in dydx_card.get('assignees', [])
-            if assignee.get('id') is not None
-        }
-        current_label_ids = {
-            str(label.get('id'))
-            for label in dydx_card.get('labels', [])
-            if label.get('id') is not None
-        }
+        
+        # Build a lookup of current DYDX field values for diff comparison
+        current_dydx = {}
+        if dydx_card:
+            for f in dydx_card.get('fields', []):
+                fid = f.get('field', {}).get('id', '')
+                current_dydx[fid] = str(f.get('value', '') or '')
+        
+        def _changed(field_id: str, new_val) -> bool:
+            """Return True only if the new value differs from the current DYDX value."""
+            if not dydx_card:
+                return True  # No existing card data — always update
+            return str(new_val or '') != current_dydx.get(field_id, '')
         
         # Sync description
-        desc = self._get_description_from_card(source_card, field_values, board_type)
-        if desc:
-            self._update_field_if_changed(
-                dydx_card_id,
-                current_fields,
-                'task_description',
-                desc,
-                error_prefix='Failed to sync description field'
-            )
+        try:
+            desc = self._get_description_from_card(source_card, field_values, board_type)
+            if desc and _changed('task_description', desc):
+                self.dydx_client.update_card_field(dydx_card_id, 'task_description', desc)
+        except Exception as e:
+            logger.error(f"Failed to sync description for DYDX card {dydx_card_id}: {e}")
         
-        # Sync hardcoded fields (Mediamark-specific)
-        self._update_field_if_changed(
-            dydx_card_id,
-            current_fields,
-            'client_name',
-            HARDCODED_CLIENT_NAME,
-            aliases=[HARDCODED_CLIENT_NAME]
-        )
-        self._update_field_if_changed(
-            dydx_card_id,
-            current_fields,
-            'system_type',
-            HARDCODED_SYSTEM_TYPE,
-            aliases=[HARDCODED_SYSTEM_TYPE]
-        )
-
+        # Sync hardcoded fields (Mediamark-specific) — only if changed
+        try:
+            if _changed('client_name', HARDCODED_CLIENT_NAME):
+                self.dydx_client.update_card_field(dydx_card_id, 'client_name', HARDCODED_CLIENT_NAME)
+        except Exception: pass
+        
+        try:
+            if _changed('system_type', HARDCODED_SYSTEM_TYPE):
+                self.dydx_client.update_card_field(dydx_card_id, 'system_type', HARDCODED_SYSTEM_TYPE)
+        except Exception: pass
+        
         try:
             project_name = self._build_project_name(source_card, field_values)
-            self._update_field_if_changed(
-                dydx_card_id,
-                current_fields,
-                'project_name',
-                project_name,
-                aliases=[project_name]
-            )
-        except Exception as e:
-            logger.error(f"Failed to sync project_name for DYDX card {dydx_card_id}: {e}")
+            if _changed('project_name', project_name):
+                self.dydx_client.update_card_field(dydx_card_id, 'project_name', project_name)
+        except Exception: pass
 
-        self._update_field_if_changed(
-            dydx_card_id,
-            current_fields,
-            'partner',
-            str(self.default_partner),
-            aliases=[HARDCODED_PARTNER, str(self.default_partner)]
-        )
+        try:
+            if _changed('partner', str(self.default_partner)):
+                self.dydx_client.update_card_field(dydx_card_id, 'partner', str(self.default_partner))
+        except Exception: pass
 
+        # Sync assignee — only if the current assignee list differs
         if target_assignee_id:
-            desired_assignee_ids = {str(target_assignee_id)}
-            if current_assignee_ids != desired_assignee_ids:
-                try:
+            try:
+                current_assignees = set(str(a['id']) for a in (dydx_card or {}).get('assignees', []))
+                if not dydx_card or current_assignees != {str(target_assignee_id)}:
                     self.dydx_client.set_card_assignees(dydx_card_id, [str(target_assignee_id)])
-                except Exception as e:
-                    logger.error(f"Failed to sync assignee for DYDX card {dydx_card_id}: {e}")
+            except Exception as e:
+                logger.error(f"Failed to sync assignee for DYDX card {dydx_card_id}: {e}")
         
-        # Sync mapped fields
+        # Sync mapped fields — only if changed
         mapping = CHANGE_REQUEST_TO_DYDX_MAPPING if board_type == 'change_request' else SUPPORT_TO_DYDX_MAPPING
         for source_field, dydx_field in mapping.items():
-            if dydx_field == 'priority' or dydx_field in UNSUPPORTED_DYDX_SYNC_FIELDS:
+            if dydx_field == 'priority':
                 continue
             val = field_values.get(source_field)
-            if val:
-                self._update_field_if_changed(dydx_card_id, current_fields, dydx_field, val)
+            if val and _changed(dydx_field, val):
+                try:
+                    self.dydx_client.update_card_field(dydx_card_id, dydx_field, val)
+                except Exception as e:
+                    logger.error(f"Failed to sync field {dydx_field} for DYDX card {dydx_card_id}: {e}")
 
-        # Sync phase info
-        self._update_phase_tracking(dydx_card_id, source_card)
-        
-        # Sync labels/priority
+        # Sync labels/priority — only if changed
         try:
             labels = self.get_combined_labels(source_card, field_values)
-            if labels and current_label_ids != {str(label_id) for label_id in labels}:
-                self._set_card_labels(dydx_card_id, labels)
+            if labels:
+                current_labels = set(str(l['id']) for l in (dydx_card or {}).get('labels', []))
+                if not dydx_card or set(labels) != current_labels:
+                    self._set_card_labels(dydx_card_id, labels)
 
             priority_value = self._get_priority_label_id_from_source(source_card)
-            if priority_value:
-                self._update_field_if_changed(
-                    dydx_card_id,
-                    current_fields,
-                    'priority',
-                    str(priority_value),
-                    aliases=self._priority_comparison_values(priority_value)
-                )
+            if priority_value and _changed('priority', str(priority_value)):
+                self.dydx_client.update_card_field(dydx_card_id, 'priority', str(priority_value))
         except Exception as e:
             logger.error(f"Failed to sync labels/priority for DYDX card {dydx_card_id}: {e}")
         
-        # Sync due date
+        # Sync due date — only if changed
         try:
             date_val = self.get_source_due_date(source_card, field_values)
             if date_val:
                 clean_date = date_val.replace('Z', '')
-                current_due_date = self._normalize_field_value(dydx_card.get('due_date'))
-                if current_due_date not in {self._normalize_field_value(date_val), self._normalize_field_value(clean_date)}:
+                # Compare against both the field value and card-level due_date
+                current_card_due = (dydx_card or {}).get('due_date', '') or ''
+                field_due_changed = _changed('due_date', clean_date)
+                card_due_changed = not dydx_card or not current_card_due.startswith(clean_date[:19])
+                
+                if card_due_changed:
                     self.dydx_client.update_card_due_date(dydx_card_id, date_val)
-                self._update_field_if_changed(dydx_card_id, current_fields, 'due_date', clean_date, aliases=[date_val, clean_date])
-                self._update_field_if_changed(dydx_card_id, current_fields, 'estimated_completion_date', clean_date, aliases=[date_val, clean_date])
+                if field_due_changed:
+                    self.dydx_client.update_card_field(dydx_card_id, 'due_date', clean_date)
+                if _changed('estimated_completion_date', clean_date):
+                    self.dydx_client.update_card_field(dydx_card_id, 'estimated_completion_date', clean_date)
         except Exception as e:
             logger.error(f"Failed to sync due date for DYDX card {dydx_card_id}: {e}")
     
@@ -1420,13 +1360,13 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                                     result['created'].append(new_card['id'])
                     else:
                         if not is_move_event:
-                            self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id)
+                            self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id, dydx_card=dydx_card)
                         else:
                             self._update_phase_tracking(dydx_card['id'], source_card)
                         result['synced'].append(dydx_card['id'])
                 else:
                     if not is_move_event:
-                        self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id)
+                        self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id, dydx_card=dydx_card)
                     result['synced'].append(dydx_card['id'])
         
             self._record_sync(source_card_id)

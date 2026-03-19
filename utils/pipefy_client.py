@@ -65,7 +65,7 @@ class PipefyClient:
 
     def _raise_graphql_error(self, result: Dict) -> None:
         error_msg = self._get_error_message(result)
-        logger.error(f"{self._log_prefix()} GraphQL error: {error_msg}")
+        logger.warning(f"{self._log_prefix()} GraphQL error: {error_msg}")
         logger.debug(f"{self._log_prefix()} Full error response: {json.dumps(result, indent=2)}")
         raise Exception(f"GraphQL error ({self.org_name}): {error_msg}")
 
