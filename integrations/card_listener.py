@@ -240,9 +240,10 @@ class MediamarkCardChangeListener:
             # Card moved to Done — close all DYDX cards
             self.sync_service.handle_support_completed(card_id)
         else:
-            # For all cards, route through field_update which handles
-            # both support tickets and CRs from the single board.
-            self.sync_service._handle_field_update(card_id, 'support_ticket')
+            # Field-level changes on the MM card are intentionally
+            # NOT synced to DYDX.  Only card.create (via webhook)
+            # and card.move (via webhook) are actionable events.
+            logger.debug(f"Listener detected change on MM card {card_id} — ignoring (field updates disabled)")
     
     def _poll_loop(self):
         """Main loop running in background thread."""

@@ -388,6 +388,12 @@ def handle_pipefy_webhook():
 
         is_field_update = action in ('card.field_update', 'card.update')
 
+        # Field-update webhooks from MM should NOT trigger any sync on the DYDX side.
+        # Only card.create and card.move events are actionable.
+        if is_field_update:
+            logger.debug(f"MM card {card_id}: ignoring {action} — field updates do not sync to DYDX")
+            return jsonify({'status': 'ignored', 'reason': 'field_updates_disabled'}), 200
+
         # Only log non-field-update events (card.create, card.move, etc.) with payload
         if not is_field_update:
             logger.info(f"MM card {card_id} received: action={action}, phase='{current_phase}', payload={json.dumps(data, default=str)}")

@@ -1364,8 +1364,10 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     else:
                         result['synced'].append(dydx_card['id'])
                 else:
-                    # Phase already matches — diff-sync only changed fields
-                    self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=None, dydx_card=dydx_card)
+                    # Phase already matches — nothing to do.
+                    # Fields were set at card creation and field-update
+                    # webhooks are intentionally ignored, so there is
+                    # never a reason to re-sync field values here.
                     result['synced'].append(dydx_card['id'])
         
             self._record_sync(source_card_id)
@@ -1504,8 +1506,8 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             return self._format_action_result(action, raw, default_status='created')
         
         if action in ['card.field_update', 'card.update']:
-            result = self._handle_field_update(source_card_id, 'support_ticket')
-            return {'status': 'field_updated' if result.get('updated') else 'no_change', **result}
+            logger.debug(f"MM card {source_card_id}: ignoring {action} — field updates do not sync to DYDX")
+            return {'status': 'ignored', 'reason': 'field_updates_disabled'}
         
         if action == 'card.move':
             phase = current_phase or ''
@@ -1551,9 +1553,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             raw = self.handle_cr_phase_transition(source_card_id, current_phase, previous_phase)
             return self._format_action_result(action, raw, default_status='moved')
 
-        if action in ['card.field_update', 'card.update']: 
-            result = self._handle_field_update(source_card_id, 'change_request')
-            return {'status': 'field_updated' if result.get('updated') else 'no_change', **result}
+        if action in ['card.field_update', 'card.update']:
+            logger.debug(f"MM card {source_card_id}: ignoring {action} — field updates do not sync to DYDX")
+            return {'status': 'ignored', 'reason': 'field_updates_disabled'}
         
         return {'status': 'no_action'}
 
