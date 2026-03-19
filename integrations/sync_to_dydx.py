@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Set, Tuple
 from utils.pipefy_client import PipefyClient
 
-from integrations.mediamark.field_mappings import (
+from integrations.field_mappings import (
     CHANGE_REQUEST_TO_DYDX_MAPPING, SUPPORT_TO_DYDX_MAPPING,
     HARDCODED_CLIENT_NAME, HARDCODED_PARTNER_ID, HARDCODED_SYSTEM_TYPE,
     PROJECT_NAME_PREFIX, TITLE_PREFIX_CR, TITLE_PREFIX_SUPPORT,

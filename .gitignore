@@ -2,7 +2,7 @@
 *.env
 .env.*
 .env.mediamark
-integrations/mediamark/.env.mediamark
+integrations/.env.mediamark
 
 # Python
 __pycache__/

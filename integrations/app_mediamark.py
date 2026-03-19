@@ -11,8 +11,8 @@ This is the Flask web server for the Mediamark integration. It:
   4. Sends logs to SolarWinds for remote monitoring
 
 === HOW TO RUN ===
-  Development:  python integrations/mediamark/app_mediamark.py
-  Production:   gunicorn -c gunicorn_config.py integrations.mediamark.app_mediamark:app
+    Development:  python integrations/app_mediamark.py
+    Production:   gunicorn -c gunicorn_config.py integrations.app_mediamark:app
 """
 
 import os
@@ -28,14 +28,14 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, '..', '..'))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, '..'))
 sys.path.insert(0, _PROJECT_ROOT)
 
 from flask import Flask, request, jsonify
 from typing import Dict, Tuple
 
-from integrations.mediamark.sync_to_dydx import MediamarkSync
-from integrations.mediamark.card_listener import start_listener, get_listener, stop_listener
+from integrations.sync_to_dydx import MediamarkSync
+from integrations.card_listener import start_listener, get_listener, stop_listener
 
 from dotenv import load_dotenv
 _ENV_FILE = os.path.join(_THIS_DIR, '.env.mediamark')

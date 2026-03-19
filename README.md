@@ -22,13 +22,10 @@ All processing happens in the background — Pipefy receives an immediate `200 O
 
 ```
 ├── integrations/
-│   └── mediamark/
-│       ├── app_mediamark.py          # Flask webhook server (entry point)
-│       ├── sync_to_dydx.py           # Core sync engine
-│       ├── card_listener.py          # Background polling fallback
-│       ├── field_mappings.py         # Field ID constants & mapping tables
-│       ├── move_mediamark_card.py    # Utility: move a card to a phase manually
-│       └── test_connection_mediamark.py  # Verify API connectivity
+│   ├── app_mediamark.py              # Flask webhook server (entry point)
+│   ├── sync_to_dydx.py               # Core sync engine
+│   ├── card_listener.py              # Background polling fallback
+│   └── field_mappings.py             # Field ID constants & mapping tables
 ├── utils/
 │   └── pipefy_client.py              # Pipefy GraphQL client (shared)
 ├── gunicorn_config.py                # Production server config
@@ -62,7 +59,7 @@ pip install -r requirements.txt
 
 ### 3. Create the environment file
 
-Create `integrations/mediamark/.env.mediamark` — this file is gitignored and must never be committed.
+Create `integrations/.env.mediamark` — this file is gitignored and must never be committed.
 
 ```env
 # Pipefy API keys
@@ -91,7 +88,7 @@ SOLARWINDS_TOKEN=your_solarwinds_token
 ### Development
 
 ```bash
-python integrations/mediamark/app_mediamark.py
+python integrations/app_mediamark.py
 ```
 
 Server starts on `http://localhost:5001`.
@@ -99,7 +96,7 @@ Server starts on `http://localhost:5001`.
 ### Production (EC2 / Linux)
 
 ```bash
-gunicorn -c gunicorn_config.py integrations.mediamark.app_mediamark:app
+gunicorn -c gunicorn_config.py integrations.app_mediamark:app
 ```
 
 ---
@@ -226,7 +223,7 @@ All sync activity is logged to:
 Each log line includes a timestamp and the module name, e.g.:
 
 ```
-2026-03-11T10:00:01 [integrations.mediamark.sync_to_dydx] INFO Created DYDX card for card 1309710645
+2026-03-11T10:00:01 [integrations.sync_to_dydx] INFO Created DYDX card for card 1309710645
 ```
 
 Test the Papertrail connection:

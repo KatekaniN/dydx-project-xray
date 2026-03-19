@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from dotenv import load_dotenv
 
-from integrations.mediamark.field_mappings import MEDIAMARK_ACTIVE_PHASES, MEDIAMARK_TERMINAL_PHASES
+from integrations.field_mappings import MEDIAMARK_ACTIVE_PHASES, MEDIAMARK_TERMINAL_PHASES
 
 load_dotenv()
 
