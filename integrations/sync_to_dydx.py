@@ -1117,110 +1117,132 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """
         pass
 
+    @staticmethod
+    def _normalize_date(val) -> str:
+        """Extract YYYY-MM-DD from a date string for comparison."""
+        if not val:
+            return ''
+        return str(val).strip().split('T')[0][:10]
+
     def _sync_card_fields(self, dydx_card_id: str, source_card: Dict, field_values: Dict, board_type: str, target_assignee_id: Optional[str] = None, dydx_card: Dict = None) -> None:
         """
-        Sync fields from Mediamark source card to DYDX card.
-        Only updates fields whose values have actually changed (diff-based).
-        
-        MEDIAMARK-SPECIFIC: Also syncs client name, project name, system type.
+        Sync ONLY genuinely-changed variable fields from Mediamark → DYDX.
+
+        Hardcoded/static fields (client_name, system_type, partner, project_name)
+        are set once during card creation and NEVER re-synced here — Pipefy returns
+        display names for ID-based fields (partner, priority) which always differ
+        from the IDs we would write, causing phantom updates on every webhook.
+
+        Priority is managed exclusively through card labels (_set_card_labels)
+        which already compares by label ID.
         """
-        
+
         # Build a lookup of current DYDX field values for diff comparison
         current_dydx = {}
         if dydx_card:
             for f in dydx_card.get('fields', []):
                 fid = f.get('field', {}).get('id', '')
                 current_dydx[fid] = str(f.get('value', '') or '')
-        
+
         def _changed(field_id: str, new_val) -> bool:
             """Return True only if the new value differs from the current DYDX value."""
             if not dydx_card:
-                return True  # No existing card data — always update
+                return True
             return str(new_val or '') != current_dydx.get(field_id, '')
-        
-        # Sync description
+
+        def _date_changed(field_id: str, new_date: str) -> bool:
+            """Compare dates by YYYY-MM-DD only (ignores time/timezone differences)."""
+            if not dydx_card:
+                return True
+            return self._normalize_date(new_date) != self._normalize_date(current_dydx.get(field_id, ''))
+
+        updates_made = 0
+
+        # --- Variable text fields ---
+
+        # 1. Description
         try:
             desc = self._get_description_from_card(source_card, field_values, board_type)
             if desc and _changed('task_description', desc):
                 self.dydx_client.update_card_field(dydx_card_id, 'task_description', desc)
+                updates_made += 1
+                logger.info(f"DYDX card {dydx_card_id}: updated task_description")
         except Exception as e:
             logger.error(f"Failed to sync description for DYDX card {dydx_card_id}: {e}")
-        
-        # Sync hardcoded fields (Mediamark-specific) — only if changed
-        try:
-            if _changed('client_name', HARDCODED_CLIENT_NAME):
-                self.dydx_client.update_card_field(dydx_card_id, 'client_name', HARDCODED_CLIENT_NAME)
-        except Exception: pass
-        
-        try:
-            if _changed('system_type', HARDCODED_SYSTEM_TYPE):
-                self.dydx_client.update_card_field(dydx_card_id, 'system_type', HARDCODED_SYSTEM_TYPE)
-        except Exception: pass
-        
-        try:
-            project_name = self._build_project_name(source_card, field_values)
-            if _changed('project_name', project_name):
-                self.dydx_client.update_card_field(dydx_card_id, 'project_name', project_name)
-        except Exception: pass
 
-        try:
-            if _changed('partner', str(self.default_partner)):
-                self.dydx_client.update_card_field(dydx_card_id, 'partner', str(self.default_partner))
-        except Exception: pass
-
-        # Sync assignee — only if the current assignee list differs
-        if target_assignee_id:
-            try:
-                current_assignees = set(str(a['id']) for a in (dydx_card or {}).get('assignees', []))
-                if not dydx_card or current_assignees != {str(target_assignee_id)}:
-                    self.dydx_client.set_card_assignees(dydx_card_id, [str(target_assignee_id)])
-            except Exception as e:
-                logger.error(f"Failed to sync assignee for DYDX card {dydx_card_id}: {e}")
-        
-        # Sync mapped fields — only if changed
+        # 2. Mapped text fields (additional_info, link_to_issue, etc.)
+        #    Skips priority (managed via labels) and due_date (handled below)
+        #    Skips task_description (handled above)
         mapping = CHANGE_REQUEST_TO_DYDX_MAPPING if board_type == 'change_request' else SUPPORT_TO_DYDX_MAPPING
         for source_field, dydx_field in mapping.items():
-            if dydx_field == 'priority':
+            if dydx_field in ('priority', 'due_date', 'task_description'):
                 continue
             val = field_values.get(source_field)
             if val and _changed(dydx_field, val):
                 try:
                     self.dydx_client.update_card_field(dydx_card_id, dydx_field, val)
+                    updates_made += 1
+                    logger.info(f"DYDX card {dydx_card_id}: updated {dydx_field}")
                 except Exception as e:
                     logger.error(f"Failed to sync field {dydx_field} for DYDX card {dydx_card_id}: {e}")
 
-        # Sync labels/priority — only if changed
+        # --- Assignee (only when explicitly requested) ---
+
+        if target_assignee_id:
+            try:
+                current_assignees = set(str(a['id']) for a in (dydx_card or {}).get('assignees', []))
+                if not dydx_card or current_assignees != {str(target_assignee_id)}:
+                    self.dydx_client.set_card_assignees(dydx_card_id, [str(target_assignee_id)])
+                    updates_made += 1
+                    logger.info(f"DYDX card {dydx_card_id}: updated assignees")
+            except Exception as e:
+                logger.error(f"Failed to sync assignee for DYDX card {dydx_card_id}: {e}")
+
+        # --- Labels (compared by ID set — no display-name problem) ---
+
         try:
             labels = self.get_combined_labels(source_card, field_values)
             if labels:
                 current_labels = set(str(l['id']) for l in (dydx_card or {}).get('labels', []))
                 if not dydx_card or set(labels) != current_labels:
                     self._set_card_labels(dydx_card_id, labels)
-
-            priority_value = self._get_priority_label_id_from_source(source_card)
-            if priority_value and _changed('priority', str(priority_value)):
-                self.dydx_client.update_card_field(dydx_card_id, 'priority', str(priority_value))
+                    updates_made += 1
+                    logger.info(f"DYDX card {dydx_card_id}: updated labels")
         except Exception as e:
-            logger.error(f"Failed to sync labels/priority for DYDX card {dydx_card_id}: {e}")
-        
-        # Sync due date — only if changed
+            logger.error(f"Failed to sync labels for DYDX card {dydx_card_id}: {e}")
+
+        # --- Due date (normalized to YYYY-MM-DD for comparison) ---
+
         try:
             date_val = self.get_source_due_date(source_card, field_values)
             if date_val:
                 clean_date = date_val.replace('Z', '')
-                # Compare against both the field value and card-level due_date
+
+                # Card-level due_date
                 current_card_due = (dydx_card or {}).get('due_date', '') or ''
-                field_due_changed = _changed('due_date', clean_date)
-                card_due_changed = not dydx_card or not current_card_due.startswith(clean_date[:19])
-                
-                if card_due_changed:
+                if self._normalize_date(clean_date) != self._normalize_date(current_card_due):
                     self.dydx_client.update_card_due_date(dydx_card_id, date_val)
-                if field_due_changed:
+                    updates_made += 1
+                    logger.info(f"DYDX card {dydx_card_id}: updated card due_date")
+
+                # Field-level due_date
+                if _date_changed('due_date', clean_date):
                     self.dydx_client.update_card_field(dydx_card_id, 'due_date', clean_date)
-                if _changed('estimated_completion_date', clean_date):
+                    updates_made += 1
+                    logger.info(f"DYDX card {dydx_card_id}: updated field due_date")
+
+                # Estimated completion date
+                if _date_changed('estimated_completion_date', clean_date):
                     self.dydx_client.update_card_field(dydx_card_id, 'estimated_completion_date', clean_date)
+                    updates_made += 1
+                    logger.info(f"DYDX card {dydx_card_id}: updated estimated_completion_date")
         except Exception as e:
             logger.error(f"Failed to sync due date for DYDX card {dydx_card_id}: {e}")
+
+        if updates_made == 0:
+            logger.info(f"DYDX card {dydx_card_id}: no field changes detected — skipping sync")
+        else:
+            logger.info(f"DYDX card {dydx_card_id}: synced {updates_made} field(s)")
     
     # ============================================
     # PER-ASSIGNEE SYNC LOGIC
