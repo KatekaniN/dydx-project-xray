@@ -1030,10 +1030,8 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         self._record_creation(source_card_id, assignee_id, final_target_phase)
         
-        try:
-            self.dydx_client.set_card_assignees(new_card['id'], [dydx_assignee_id])
-        except Exception as e:
-            logger.warning(f"Failed to set assignee on DYDX card {new_card['id']}: {e}")
+        # Assignee is already set via the 'assignee' field in dydx_fields above.
+        # Calling set_card_assignees again would trigger a remove+add in Pipefy's activity log.
         
         if final_target_phase:
             target_phase_id = self.dydx_phases.get(final_target_phase.lower())
@@ -1111,29 +1109,13 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         })
     
     def _update_phase_tracking(self, dydx_card_id: str, source_card: Dict) -> None:
-        """Update only the phase tracking fields on a DYDX card (lightweight, used on moves).
+        """No-op: main_task_status_name/id are phase-locked on the DYDX board.
         
-        NOTE: main_task_status_name/id are phase-locked on the DYDX board — they can only be
-        written on the phase where the card was created. Updates after a move will silently fail.
+        These fields can only be written on the phase where the card was created.
+        They are already set during card creation in create_dydx_card_for_assignee().
+        Any attempt to update them after a move will always fail, so we skip entirely.
         """
-        phase_name = source_card.get('current_phase', {}).get('name')
-        phase_id = source_card.get('current_phase', {}).get('id')
-        if phase_name:
-            try:
-                self.dydx_client.update_card_field(dydx_card_id, 'main_task_status_name', phase_name)
-            except Exception as e:
-                if 'only editable on its original phase' in str(e):
-                    logger.debug(f"Phase-locked field main_task_status_name skipped for DYDX card {dydx_card_id}")
-                else:
-                    logger.warning(f"Failed to update main_task_status_name on DYDX card {dydx_card_id}: {e}")
-        if phase_id:
-            try:
-                self.dydx_client.update_card_field(dydx_card_id, 'main_task_status_id', phase_id)
-            except Exception as e:
-                if 'only editable on its original phase' in str(e):
-                    logger.debug(f"Phase-locked field main_task_status_id skipped for DYDX card {dydx_card_id}")
-                else:
-                    logger.warning(f"Failed to update main_task_status_id on DYDX card {dydx_card_id}: {e}")
+        pass
 
     def _sync_card_fields(self, dydx_card_id: str, source_card: Dict, field_values: Dict, board_type: str, target_assignee_id: Optional[str] = None, dydx_card: Dict = None) -> None:
         """
@@ -1348,8 +1330,6 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                             try:
                                 self.dydx_client.move_card_to_phase(dydx_card['id'], target_phase_id)
                                 logger.info(f"Moved DYDX card {dydx_card['id']}: '{dydx_phase}' → '{correct_dydx_phase}' (MM card {source_card_id})")
-                                # On moves: only update phase tracking fields, skip full field sync
-                                self._update_phase_tracking(dydx_card['id'], source_card)
                                 result['moved'].append(dydx_card['id'])
                             except Exception as e:
                                 logger.error(f"Move failed for DYDX card {dydx_card['id']} (MM card {source_card_id}): {e}")
@@ -1358,15 +1338,12 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                                 result['closed'].append(dydx_card['id'])
                                 if new_card and new_card.get('id'):
                                     result['created'].append(new_card['id'])
+                    # Phase doesn't match but move not enabled — just record as synced
                     else:
-                        if not is_move_event:
-                            self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id, dydx_card=dydx_card)
-                        else:
-                            self._update_phase_tracking(dydx_card['id'], source_card)
                         result['synced'].append(dydx_card['id'])
                 else:
-                    if not is_move_event:
-                        self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id, dydx_card=dydx_card)
+                    # Phase already matches — diff-sync only changed fields
+                    self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=None, dydx_card=dydx_card)
                     result['synced'].append(dydx_card['id'])
         
             self._record_sync(source_card_id)
@@ -1376,59 +1353,39 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             sync_lock.release()
 
     def _handle_field_update(self, source_card_id: str, board_type: str) -> Dict:
-        """Handle field updates with duplicate and loop prevention."""
+        """Handle field updates: only sync changed fields on existing DYDX cards.
+        
+        Unlike card.create or card.move, field updates should NOT re-evaluate
+        assignees, create new cards, or close old ones.  We simply find
+        existing linked DYDX cards and push any changed field values.
+        """
         if not self._start_processing(source_card_id):
             return {'updated': False, 'reason': 'already_processing'}
         
         try:
             source_data = self.mediamark_client.get_card(source_card_id)
             source_card = source_data['data']['card']
-            current_phase = source_card.get('current_phase', {}).get('name', '')
+            field_values = self.extract_field_values(source_card)
             
-            if board_type == 'support_ticket':
-                if self._phase_matches(current_phase, self.SUPPORT_COMMS_PHASES):
-                    target_phase = 'testing / comms'
-                    enable_move = True
-                elif self._phase_matches(current_phase, self.SUPPORT_TESTING_PHASES):
-                    target_phase = 'testing / comms'
-                    enable_move = True
-                elif self._phase_matches(current_phase, self.SUPPORT_IN_PROGRESS_PHASES):
-                    target_phase = 'in progress'
-                    enable_move = True
-                elif self._phase_matches(current_phase, self.SUPPORT_BACKLOG_PHASES):
-                    target_phase = 'backlog'
-                    enable_move = False
-                else:
-                    target_phase = None
-                    enable_move = False
-                
-                result = self.sync_assignees_to_dydx(source_card_id, board_type, target_phase=target_phase, enable_move=enable_move, is_move_event=False, source_card=source_card)
-            else:
-                if self._phase_matches(current_phase, self.CR_COMPLETED_PHASES):
-                    all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
-                    for dydx_card in all_cards:
-                        self.close_dydx_card(dydx_card['id'], source_card)
-                    result = {'closed': [c['id'] for c in all_cards], 'created': [], 'synced': []}
-                
-                elif self._phase_matches(current_phase, self.CR_CANCELLED_PHASES):
-                    all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
-                    cancelled_phase_id = self.dydx_phases.get('cancelled')
-                    for dydx_card in all_cards:
-                        try:
-                            self.dydx_client.move_card_to_phase(dydx_card['id'], cancelled_phase_id)
-                        except Exception as e:
-                            if "already in the destination phase" not in str(e):
-                                logger.error(f"Failed to move DYDX card {dydx_card['id']} to cancelled (MM card {source_card_id}): {e}")
-                    result = {'cancelled': [c['id'] for c in all_cards], 'created': [], 'synced': []}
-                
-                elif self._is_excluded_cr_phase(current_phase):
-                    result = {'status': 'excluded', 'created': [], 'synced': []}
-                
-                else:
-                    correct_dydx_phase = self._get_correct_dydx_phase(current_phase)
-                    result = self.sync_assignees_to_dydx(source_card_id, board_type, target_phase=correct_dydx_phase, enable_move=True, is_move_event=False, source_card=source_card)
+            existing_dydx_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
+            if not existing_dydx_cards:
+                return {'updated': False, 'reason': 'no_dydx_cards'}
             
-            return {'updated': True, 'result': result}
+            synced = []
+            for dydx_card in existing_dydx_cards:
+                dydx_card_id = dydx_card.get('id')
+                if not dydx_card_id:
+                    continue
+                assignee_id = dydx_card.get('_assignee_id')
+                self._sync_card_fields(
+                    dydx_card_id, source_card, field_values, board_type,
+                    target_assignee_id=None,  # don't touch assignees on field updates
+                    dydx_card=dydx_card,
+                )
+                synced.append(dydx_card_id)
+            
+            self._record_sync(source_card_id)
+            return {'updated': True, 'synced': synced}
         
         finally:
             self._end_processing(source_card_id)
@@ -1526,9 +1483,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         if action in ['card.field_update', 'card.update']:
             result = self._handle_field_update(source_card_id, 'support_ticket')
-            if result.get('updated'):
-                return {'status': 'field_updated', **result['result']}
-            return result
+            return {'status': 'field_updated' if result.get('updated') else 'no_change', **result}
         
         if action == 'card.move':
             phase = current_phase or ''
@@ -1576,9 +1531,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
 
         if action in ['card.field_update', 'card.update']: 
             result = self._handle_field_update(source_card_id, 'change_request')
-            if result.get('updated'):
-                return {'status': 'field_updated', **result['result']}
-            return result
+            return {'status': 'field_updated' if result.get('updated') else 'no_change', **result}
         
         return {'status': 'no_action'}
 
