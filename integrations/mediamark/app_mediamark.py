@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Mediamark Webhook Server
-Real-time sync from Mediamark → DYDX Development Tasks Management board.
+Real-time sync from Mediamark â†’ DYDX Development Tasks Management board.
 
 === WHAT THIS FILE DOES ===
 This is the Flask web server for the Mediamark integration. It:
@@ -133,7 +133,7 @@ if SW_LOG_URL and SW_API_TOKEN:
         sw_handler = QueueHandler()
         sw_handler.setFormatter(PapertrailFormatter())  # Papertrail adds timestamp; we format as: mediamark_dydx_sync: {job_ref}, card_id {card_id} : {message}
         # Add sw_handler only to root logger so all modules (sync_to_dydx, card_listener, etc.)
-        # ship logs to Papertrail via natural propagation — avoids double-sending.
+        # ship logs to Papertrail via natural propagation avoids double-sending.
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
         root_logger.addHandler(sw_handler)
@@ -160,7 +160,7 @@ card_listener = None
 
 if ENABLE_LISTENER:
     try:
-        card_listener = start_listener(sync_service, sync_service.clients.mediamark_client)
+        card_listener = start_listener(sync_service, sync_service.mediamark_client)
         logger.info(" Mediamark card change listener ENABLED")
     except Exception as e:
         logger.error(f"Failed to start card listener: {e}")
@@ -241,10 +241,10 @@ def _finish_job(job_id: str, result=None, error: str = None):
 
 @app.route('/')
 def index():
-    """Root endpoint — confirms the server is running."""
+    """Root endpoint confirms the server is running."""
     return jsonify({
         'status': 'online',
-        'service': 'Mediamark → DYDX Webhook Server',
+        'service': 'Mediamark -> DYDX Webhook Server',
         'version': '1.0.0'
     })
 
@@ -310,7 +310,7 @@ def sanitize_json_keys(text):
 @app.route('/mediamark/events', methods=['POST', 'GET'])
 def handle_pipefy_webhook():
     """
-    Main webhook handler — receives events from Mediamark's Pipefy boards
+    Main webhook handler receives events from Mediamark's Pipefy boards
     and routes them to the correct sync handler.
     """
     try:
@@ -361,11 +361,11 @@ def handle_pipefy_webhook():
         if not action:
             return jsonify({'status': 'ok', 'message': 'Test webhook received'}), 200
 
-        # Extract card — Pipefy sends card at the TOP LEVEL, but also check inside data.data for older formats
+        # Extract card Pipefy sends card at the TOP LEVEL, but also check inside data.data for older formats
         card_data = data.get('card', {}) or data.get('data', {}).get('card', {})
         card_id = card_data.get('id')
 
-        # pipe_id — Pipefy sends it as a direct field (e.g. "pipe_id": "Tb2mWWYy") or nested pipe.id
+        # pipe_id Pipefy sends it as a direct field (e.g. "pipe_id": "Tb2mWWYy") or nested pipe.id
         pipe_id = (
             card_data.get('pipe_id')
             or card_data.get('pipe', {}).get('id')
@@ -386,17 +386,23 @@ def handle_pipefy_webhook():
         _now = datetime.now(timezone.utc)
         job_ref = _now.strftime('%H%M%S') + str(_now.microsecond // 1000).zfill(3)
 
-        logger.info(f"Webhook received: action={action}, phase='{current_phase}'")
+        is_field_update = action in ('card.field_update', 'card.update')
+
+        # Only log non-field-update events (card.create, card.move, etc.) with payload
+        if not is_field_update:
+            logger.info(f"MM card {card_id} received: action={action}, phase='{current_phase}', payload={json.dumps(data, default=str)}")
 
         # Since the webhook is registered only on the Mediamark support pipe, any event
-        # with a valid card_id is from that pipe — process it regardless of pipe_id encoding.
+        # with a valid card_id is from that pipe process it regardless of pipe_id encoding.
         # (Pipefy may send pipe_id as a numeric string OR a base64-encoded global ID.)
         if card_id:
             job_id = _create_job(card_id, action)
             def _process(jid=job_id, jref=job_ref):
                 set_log_context(card_id, jref)
                 try:
-                    logger.info(f"Sync started: action={action}")
+                    # Notify card listener to skip this card (webhook already handling it)
+                    if card_listener:
+                        card_listener.mark_recently_processed(card_id)
                     result = sync_service.process_support_webhook(
                         source_card_id=card_id,
                         action=action,
@@ -404,10 +410,9 @@ def handle_pipefy_webhook():
                         previous_phase=previous_phase
                     )
                     _finish_job(jid, result=result)
-                    logger.info(f"Sync completed")
                 except Exception as bg_err:
                     _finish_job(jid, error=str(bg_err))
-                    logger.error(f"Sync failed: {bg_err}", exc_info=True)
+                    logger.error(f"Sync failed for MM card {card_id}: {bg_err}", exc_info=True)
                 finally:
                     clear_log_context()
             threading.Thread(target=_process, daemon=True).start()
@@ -426,7 +431,7 @@ def handle_pipefy_webhook():
 
 @app.route('/webhook/test', methods=['POST'])
 def test_webhook():
-    """Manual test endpoint — disabled in production. Set ENABLE_DEBUG_ENDPOINTS=true to use.
+    """Manual test endpoint disabled in production. Set ENABLE_DEBUG_ENDPOINTS=true to use.
     
     POST body:
     {
@@ -521,7 +526,7 @@ def recent_jobs():
 
 @app.route('/webhook/debug', methods=['POST'])
 def debug_webhook():
-    """Accepts any POST and logs it — disabled in production."""
+    """Accepts any POST and logs it disabled in production."""
     if not ENABLE_DEBUG_ENDPOINTS:
         return jsonify({'status': 'disabled', 'message': 'Debug endpoints are disabled in production.'}), 403
     return jsonify({'status': 'logged'}), 200
@@ -529,11 +534,11 @@ def debug_webhook():
 
 @app.route('/debug/card/<card_id>', methods=['GET'])
 def debug_card(card_id):
-    """Inspect fields extracted from a Mediamark source card — disabled in production."""
+    """Inspect fields extracted from a Mediamark source card disabled in production."""
     if not ENABLE_DEBUG_ENDPOINTS:
         return jsonify({'status': 'disabled', 'message': 'Debug endpoints are disabled in production.'}), 403
     try:
-        source_data = sync_service.clients.mediamark_client.get_card(card_id)
+        source_data = sync_service.mediamark_client.get_card(card_id)
         source_card = source_data['data']['card']
 
         fields_raw = []
@@ -601,7 +606,7 @@ def listener_start():
         if card_listener:
             card_listener.start()
         else:
-            card_listener = start_listener(sync_service, sync_service.clients.mediamark_client)
+            card_listener = start_listener(sync_service, sync_service.mediamark_client)
         return jsonify({'status': 'started'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -630,7 +635,7 @@ def listener_force_check():
 
 @app.route('/listener/sync/<card_id>', methods=['POST'])
 def listener_sync_card(card_id):
-    """Force sync a specific Mediamark card immediately — disabled in production."""
+    """Force sync a specific Mediamark card immediately disabled in production."""
     if not ENABLE_DEBUG_ENDPOINTS:
         return jsonify({'status': 'disabled', 'message': 'Debug endpoints are disabled in production.'}), 403
     try:
@@ -638,7 +643,7 @@ def listener_sync_card(card_id):
         result = sync_service._handle_field_update(card_id, board_type)
         return jsonify(result), 200
     except Exception as e:
-        logger.error(f"Sync error: {str(e)}", exc_info=True)
+        logger.error(f"Sync error for MM card {card_id}: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 
@@ -678,7 +683,7 @@ def close_single_card(dydx_card_id):
         sync_service.close_dydx_card(dydx_card_id, None)
         return jsonify({'status': 'closed', 'card_id': dydx_card_id}), 200
     except Exception as e:
-        logger.error(f"Error closing card: {e}", exc_info=True)
+        logger.error(f"Error closing DYDX card {dydx_card_id}: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 

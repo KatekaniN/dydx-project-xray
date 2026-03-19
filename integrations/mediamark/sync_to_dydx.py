@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 
 
 import os
@@ -11,50 +11,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Set, Tuple
 from utils.pipefy_client import PipefyClient
 
-# ---- Import field mappings ----
-try:
-    from integrations.mediamark.field_mappings import (
-        CHANGE_REQUEST_TO_DYDX_MAPPING, SUPPORT_TO_DYDX_MAPPING,
-        HARDCODED_CLIENT_NAME, HARDCODED_PARTNER_ID, HARDCODED_SYSTEM_TYPE,
-        PROJECT_NAME_PREFIX, TITLE_PREFIX_CR, TITLE_PREFIX_SUPPORT,
-        CR_DESCRIPTION_FIELD_PATTERNS, SUPPORT_DESCRIPTION_FIELD_PATTERNS,
-        TYPE_OF_REQUEST_FIELD_PATTERNS, SYSTEM_FIELD_PATTERNS,
-        SUPPORT_REQUEST_TYPE_FIELD_PATTERNS, CR_REQUEST_TYPES
-    )
-except ImportError:
-    from field_mappings import (
-        CHANGE_REQUEST_TO_DYDX_MAPPING, SUPPORT_TO_DYDX_MAPPING,
-        HARDCODED_CLIENT_NAME, HARDCODED_PARTNER_ID, HARDCODED_SYSTEM_TYPE,
-        PROJECT_NAME_PREFIX, TITLE_PREFIX_CR, TITLE_PREFIX_SUPPORT,
-        CR_DESCRIPTION_FIELD_PATTERNS, SUPPORT_DESCRIPTION_FIELD_PATTERNS,
-        TYPE_OF_REQUEST_FIELD_PATTERNS, SYSTEM_FIELD_PATTERNS,
-        SUPPORT_REQUEST_TYPE_FIELD_PATTERNS, CR_REQUEST_TYPES
-    )
+from integrations.mediamark.field_mappings import (
+    CHANGE_REQUEST_TO_DYDX_MAPPING, SUPPORT_TO_DYDX_MAPPING,
+    HARDCODED_CLIENT_NAME, HARDCODED_PARTNER_ID, HARDCODED_SYSTEM_TYPE,
+    PROJECT_NAME_PREFIX, TITLE_PREFIX_CR, TITLE_PREFIX_SUPPORT,
+    CR_DESCRIPTION_FIELD_PATTERNS, SUPPORT_DESCRIPTION_FIELD_PATTERNS,
+    TYPE_OF_REQUEST_FIELD_PATTERNS, SYSTEM_FIELD_PATTERNS,
+    SUPPORT_REQUEST_TYPE_FIELD_PATTERNS, CR_REQUEST_TYPES
+)
 
 logger = logging.getLogger(__name__)
-
-
-class MediamarkPipefyClient:
-    
-    def __init__(self):
-        mediamark_key = os.getenv('MEDIAMARK_API_KEY')
-        dydx_key = os.getenv('DYDX_API_KEY')
-        
-        if not mediamark_key:
-            raise ValueError(
-                " MEDIAMARK_API_KEY not found in environment variables!\n"
-            )
-        if not dydx_key:
-            raise ValueError(
-                " DYDX_API_KEY not found in environment variables!\n"
-            )
-        
-        # Create clients for both orgs
-        self.mediamark_client = PipefyClient(mediamark_key, org_name="mediamark")
-        self.dydx_client = PipefyClient(dydx_key, org_name="dydx")
-        
-        logger.info(" Pipefy API clients initialized for Mediamark and DYDX")
-
 
 class MediamarkSync:
     """
@@ -92,8 +58,17 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         3. Fetches the DYDX board's label IDs
         4. Sets up thread-safety locks
         """
-        # Initialize the Mediamark + DYDX client pair
-        self.clients = MediamarkPipefyClient()
+        mediamark_key = os.getenv('MEDIAMARK_API_KEY')
+        dydx_key = os.getenv('DYDX_API_KEY')
+        if not mediamark_key:
+            raise ValueError("MEDIAMARK_API_KEY not found in environment variables")
+        if not dydx_key:
+            raise ValueError("DYDX_API_KEY not found in environment variables")
+
+        self.mediamark_client = PipefyClient(mediamark_key, org_name="mediamark")
+        self.dydx_client = PipefyClient(dydx_key, org_name="dydx")
+
+        logger.info("Pipefy API clients initialized for Mediamark and DYDX")
         
     # The DYDX Development Tasks Management board pipe ID
         self.dydx_pipe_id = os.getenv('DYDX_DEV_TASKS_PIPE_ID')
@@ -136,7 +111,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         self._last_known_phase: Dict[str, Dict] = {}
         self._processing_cards: set = set()
         
-        logger.info(f" MediamarkSync initialized (PER-ASSIGNEE MODE). Phases: {list(self.dydx_phases.keys())}")
+        logger.info(f"MediamarkSync initialized. Phases: {list(self.dydx_phases.keys())}")
     
     # ============================================
     # THREAD SAFETY — Locks and deduplication
@@ -156,7 +131,6 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         with self._lock_manager:
             last_sync = self._sync_timestamps.get(source_card_id, 0)
             if current_time - last_sync < self.SYNC_DEDUP_WINDOW:
-                logger.info(f" Skipping duplicate sync for {source_card_id} (last sync {current_time - last_sync:.1f}s ago)")
                 return True
             return False
     
@@ -171,7 +145,6 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         with self._lock_manager:
             last_created = self._recently_created.get(key, 0)
             if time.time() - last_created < self.CREATION_COOLDOWN:
-                logger.info(f" Card recently created for {key} ({time.time() - last_created:.1f}s ago)")
                 return True
             return False
     
@@ -209,7 +182,6 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """Mark a card as currently being processed (prevents re-entry)."""
         with self._lock_manager:
             if source_card_id in self._processing_cards:
-                logger.info(f" Card {source_card_id} already being processed, skipping")
                 return False
             self._processing_cards.add(source_card_id)
             return True
@@ -282,7 +254,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """Fetch all phases from the DYDX board. Returns dict: phase name (lower) → phase ID."""
         try:
             query = """query GetPipePhases($pipeId: ID!) { pipe(id: $pipeId) { phases { id name } } }"""
-            result = self.clients.dydx_client.execute_query(query, {'pipeId': self.dydx_pipe_id})
+            result = self.dydx_client.execute_query(query, {'pipeId': self.dydx_pipe_id})
             phases = result.get('data', {}).get('pipe', {}).get('phases', [])
             return {p['name'].lower().strip(): p['id'] for p in phases}
         except Exception as e:
@@ -293,7 +265,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """Fetch priority labels from the DYDX board. Falls back to low if specific priority labels not found."""
         try:
             query = """query GetPipeLabels($pipeId: ID!) { pipe(id: $pipeId) { labels { id name } } }"""
-            result = self.clients.dydx_client.execute_query(query, {'pipeId': self.dydx_pipe_id})
+            result = self.dydx_client.execute_query(query, {'pipeId': self.dydx_pipe_id})
             labels = result.get('data', {}).get('pipe', {}).get('labels', [])
             label_map = {}
             for l in labels:
@@ -317,7 +289,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 }
             }
             """
-            result = self.clients.dydx_client.execute_query(query, {'orgId': org_id})
+            result = self.dydx_client.execute_query(query, {'orgId': org_id})
             users = result.get('data', {}).get('organization', {}).get('users', [])
             by_email: Dict[str, Dict[str, str]] = {}
             for user in users:
@@ -344,7 +316,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 }
             }
             """
-            result = self.clients.dydx_client.execute_query(query, {'pipeId': self.dydx_pipe_id})
+            result = self.dydx_client.execute_query(query, {'pipeId': self.dydx_pipe_id})
             members = result.get('data', {}).get('pipe', {}).get('members', [])
             by_email: Dict[str, Dict[str, str]] = {}
             for member in members:
@@ -529,7 +501,6 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         # First check direct keys in field_values
         for key in ['description', 'initial_notes', 'task_description']:
             if field_values.get(key):
-                logger.info(f" Found description via direct key '{key}'")
                 return str(field_values[key])
         
         # Search through all fields by label/name patterns
@@ -548,16 +519,8 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                         continue
                     desc_value = str(value).strip()
                     if desc_value and desc_value != '[]' and desc_value != 'null':
-                        logger.info(f" Found description in field '{field_label}' (id: {field_id}): {desc_value[:50]}...")
                         return desc_value
         
-        logger.info(f" No description field found")
-        return ""
-    
-    # ============================================
-    # HELPERS — Shared utility methods
-    # ============================================
-    
     def get_combined_labels(self, card_data: Dict, field_values: Dict) -> List[str]:
         """Map source card labels to DYDX priority label IDs."""
         labels_to_apply = []
@@ -602,14 +565,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     def extract_field_values(self, card: Dict) -> Dict[str, Any]:
         """Extract all field values from a source card into a flat dict."""
         values = {}
-        logger.info(f" Extracting fields from card...")
         for field in card.get('fields', []):
             if field.get('value') is not None:
-                field_id = field['field']['id']
-                field_label = field.get('field', {}).get('label', field_id)
-                values[field_id] = field['value']
-                if any(x in field_id.lower() or x in field_label.lower() for x in ['tester', 'due', 'date', 'assign', 'description', 'notes']):
-                    logger.info(f"  Field '{field_label}' (id: {field_id}): {str(field['value'])[:100]}")
+                values[field['field']['id']] = field['value']
         if card.get('due_date'):
             values['due_date'] = card.get('due_date')
         return values
@@ -642,7 +600,6 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 dt_obj = datetime.fromisoformat(clean[:10] + 'T00:00:00')
             dt_obj = dt_obj + timedelta(hours=hours)
             result = dt_obj.strftime('%Y-%m-%dT%H:%M:%S') + 'Z'
-            logger.info(f" Added {hours} hours to {date_str} → {result}")
             return result
         except Exception as e:
             logger.warning(f" Failed to add hours to date {date_str}: {e}")
@@ -801,7 +758,6 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         if not clean_ids:
             creator = source_card.get('createdBy')
             if creator and creator.get('id'):
-                logger.info(f"No assignees found. Defaulting to Creator: {creator['name']} ({creator['id']})")
                 clean_ids.append(str(creator['id']))
                 
         return list(set(clean_ids))
@@ -921,7 +877,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         try:
             while has_next:
                 variables = {'pipeId': self.dydx_pipe_id, 'after': cursor}
-                result = self.clients.dydx_client.execute_query(query, variables)
+                result = self.dydx_client.execute_query(query, variables)
                 
                 data = result.get('data', {}).get('cards', {})
                 edges = data.get('edges', [])
@@ -947,7 +903,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 cursor = page_info.get('endCursor')
                 
         except Exception as e:
-            logger.error(f"Error finding active DYDX cards: {e}")
+            logger.error(f"Error finding active DYDX cards for MM card {source_card_id}: {e}")
             return []
             
         return matching_cards
@@ -965,7 +921,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     # CREATE & CLOSE DYDX CARDS
     # ============================================
     
-    def create_dydx_card_for_assignee(self, source_card: Dict, board_type: str, assignee_id: str, target_phase: str = None) -> Optional[Dict]:
+    def create_dydx_card_for_assignee(self, source_card: Dict, board_type: str, assignee_id: str, target_phase: str = None, skip_duplicate_check: bool = False) -> Optional[Dict]:
         """
         Create a DYDX Development Tasks card for one assignee.
         
@@ -988,23 +944,22 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         # DUPLICATE CHECK
         if self._was_recently_created(source_card_id, assignee_id, final_target_phase):
-            logger.info(f" Skipping creation - card recently created for {source_card_id}:{assignee_id}:{final_target_phase}")
             existing = self.find_dydx_card_for_assignee(source_card_id, assignee_id)
             return existing
         
-        existing_card = self.find_dydx_card_for_assignee(source_card_id, assignee_id)
-        if existing_card:
-            raise ValueError(
-                f"DYDX card already exists for source card {source_card_id} "
-                f"(assignee {assignee_id}) → existing DYDX card {existing_card['id']}. "
-                f"No new card created."
-            )
+        if not skip_duplicate_check:
+            existing_card = self.find_dydx_card_for_assignee(source_card_id, assignee_id)
+            if existing_card:
+                raise ValueError(
+                    f"DYDX card already exists for source card {source_card_id} "
+                    f"(assignee {assignee_id}) → existing DYDX card {existing_card['id']}. "
+                    f"No new card created."
+                )
         
         dydx_assignee_id, dydx_assignee_name = self._resolve_dydx_assignee(source_card, assignee_id)
         if not dydx_assignee_id:
-            logger.warning(f"Skipping card creation for source {source_card_id}: could not resolve DYDX assignee from source assignee {assignee_id}")
+            logger.warning(f"MM card {source_card_id}: could not resolve DYDX assignee from source assignee {assignee_id}")
             return None
-        logger.info(f" Creating DYDX card: source={source_card_id}, assignee={dydx_assignee_name} ({dydx_assignee_id}), phase={final_target_phase}")
         
         # ---- Build DYDX card fields ----
         
@@ -1058,38 +1013,42 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         if current_phase_id:
             dydx_fields.append({'field_id': 'main_task_status_id', 'field_value': current_phase_id})
         
-        result = self.clients.dydx_client.create_card(
+        logger.info(
+            f"Creating DYDX card for MM card {source_card_id} | "
+            f"title='{title}', due_date={date_val}, "
+            f"fields={json.dumps(dydx_fields, default=str)}"
+        )
+        result = self.dydx_client.create_card(
             self.dydx_pipe_id, 
             title, 
             dydx_fields, 
             due_date=date_val
         )
         new_card = result['data']['createCard']['card']
-        logger.info(f" Created DYDX card for {dydx_assignee_name}: {new_card['id']}")
+        logger.info(f"Created DYDX card {new_card['id']} for MM card {source_card_id} (assignee={dydx_assignee_name}, phase={final_target_phase})")
         
         self._record_creation(source_card_id, assignee_id, final_target_phase)
         
         try:
-            self.clients.dydx_client.set_card_assignees(new_card['id'], [dydx_assignee_id])
-            logger.info(f"Set assignee {dydx_assignee_id} ({dydx_assignee_name}) on card {new_card['id']}")
+            self.dydx_client.set_card_assignees(new_card['id'], [dydx_assignee_id])
         except Exception as e:
-            logger.warning(f" Failed to set assignee: {e}")
+            logger.warning(f"Failed to set assignee on DYDX card {new_card['id']}: {e}")
         
         if final_target_phase:
             target_phase_id = self.dydx_phases.get(final_target_phase.lower())
             if target_phase_id:
                 try:
-                    self.clients.dydx_client.move_card_to_phase(new_card['id'], target_phase_id)
+                    self.dydx_client.move_card_to_phase(new_card['id'], target_phase_id)
                 except Exception as e:
                     if "already in the destination phase" not in str(e):
-                        logger.warning(f" Failed to move new card: {e}")
+                        logger.warning(f"Failed to move new DYDX card {new_card['id']} (MM card {source_card_id}): {e}")
         
         return new_card
 
     def close_dydx_card(self, dydx_card_id: str, source_card: Dict = None) -> bool:
         """Close a DYDX card by moving it to the Done phase."""
         try:
-            card = self.clients.dydx_client.get_card(dydx_card_id)
+            card = self.dydx_client.get_card(dydx_card_id)
             current_phase_id = card.get('data', {}).get('card', {}).get('current_phase', {}).get('id')
             done_phase_id = self.dydx_phases.get('done')
             if current_phase_id and done_phase_id and current_phase_id == done_phase_id:
@@ -1097,25 +1056,24 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         except Exception: pass
 
         try:
-            self.clients.dydx_client.update_card_field(dydx_card_id, 'test_environment', 'Production')
-        except Exception as e:
-            logger.warning(f"Failed to update test_environment: {e}")
+            self.dydx_client.update_card_field(dydx_card_id, 'test_environment', 'Production')
+        except Exception: pass
 
         try:
             today_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT09:00:00Z")
-            self.clients.dydx_client.update_card_field(dydx_card_id, 'estimated_completion_date', today_str)
+            self.dydx_client.update_card_field(dydx_card_id, 'estimated_completion_date', today_str)
         except Exception: pass
         
         target_phase_id = self.dydx_phases.get('done')
         if target_phase_id:
             try:
-                self.clients.dydx_client.move_card_to_phase(dydx_card_id, target_phase_id)
-                logger.info(f" Closed DYDX card {dydx_card_id}")
+                self.dydx_client.move_card_to_phase(dydx_card_id, target_phase_id)
+                logger.info(f"Closed DYDX card {dydx_card_id}")
                 return True
             except Exception as e:
                 if "already in the destination phase" in str(e):
                     return True
-                logger.error(f"Failed to close card (move phase): {e}")
+                logger.error(f"Failed to close DYDX card {dydx_card_id} (move phase): {e}")
                 return False
         return False
     
@@ -1132,7 +1090,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             }
         }
         """
-        return self.clients.dydx_client.execute_query(mutation, {
+        return self.dydx_client.execute_query(mutation, {
             'cardId': card_id,
             'labelIds': label_ids
         })
@@ -1146,56 +1104,64 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             }
         }
         """
-        return self.clients.dydx_client.execute_query(mutation, {
+        return self.dydx_client.execute_query(mutation, {
             'cardId': card_id,
             'title': title
         })
     
+    def _update_phase_tracking(self, dydx_card_id: str, source_card: Dict) -> None:
+        """Update only the phase tracking fields on a DYDX card (lightweight, used on moves)."""
+        phase_name = source_card.get('current_phase', {}).get('name')
+        phase_id = source_card.get('current_phase', {}).get('id')
+        if phase_name:
+            try:
+                self.dydx_client.update_card_field(dydx_card_id, 'main_task_status_name', phase_name)
+            except Exception:
+                pass
+        if phase_id:
+            try:
+                self.dydx_client.update_card_field(dydx_card_id, 'main_task_status_id', phase_id)
+            except Exception:
+                pass
+
     def _sync_card_fields(self, dydx_card_id: str, source_card: Dict, field_values: Dict, board_type: str, target_assignee_id: Optional[str] = None) -> None:
         """
         Sync fields from Mediamark source card to DYDX card.
         
         MEDIAMARK-SPECIFIC: Also syncs client name, project name, system type.
         """
-        logger.info(f"Syncing fields for card: {dydx_card_id}")
         
         # Sync description
         try:
             desc = self._get_description_from_card(source_card, field_values, board_type)
             if desc:
-                self.clients.dydx_client.update_card_field(dydx_card_id, 'task_description', desc)
-                logger.info(f" Synced description: {desc[:50]}...")
+                self.dydx_client.update_card_field(dydx_card_id, 'task_description', desc)
         except Exception as e:
-            logger.warning(f"Failed to sync description: {e}")
+            logger.error(f"Failed to sync description for DYDX card {dydx_card_id}: {e}")
         
         # Sync hardcoded fields (Mediamark-specific)
         try:
-            self.clients.dydx_client.update_card_field(dydx_card_id, 'client_name', HARDCODED_CLIENT_NAME)
+            self.dydx_client.update_card_field(dydx_card_id, 'client_name', HARDCODED_CLIENT_NAME)
         except Exception: pass
         
         try:
-            self.clients.dydx_client.update_card_field(dydx_card_id, 'system_type', HARDCODED_SYSTEM_TYPE)
+            self.dydx_client.update_card_field(dydx_card_id, 'system_type', HARDCODED_SYSTEM_TYPE)
         except Exception: pass
         
         try:
             project_name = self._build_project_name(source_card, field_values)
-            self.clients.dydx_client.update_card_field(dydx_card_id, 'project_name', project_name)
+            self.dydx_client.update_card_field(dydx_card_id, 'project_name', project_name)
         except Exception: pass
 
         try:
-            self.clients.dydx_client.update_card_field(dydx_card_id, 'partner', str(self.default_partner))
-        except Exception:
-            pass
+            self.dydx_client.update_card_field(dydx_card_id, 'partner', str(self.default_partner))
+        except Exception: pass
 
         if target_assignee_id:
             try:
-                # Use set_card_assignees (updateCard mutation with assignee_ids).
-                # This is the only reliable way to set the top-level card assignee in Pipefy.
-                # update_card_field does NOT work for assignee_select fields.
-                self.clients.dydx_client.set_card_assignees(dydx_card_id, [str(target_assignee_id)])
-                logger.info(f"Set assignee {target_assignee_id} on card {dydx_card_id}")
+                self.dydx_client.set_card_assignees(dydx_card_id, [str(target_assignee_id)])
             except Exception as e:
-                logger.warning(f"Failed to sync assignee for {dydx_card_id}: {e}")
+                logger.error(f"Failed to sync assignee for DYDX card {dydx_card_id}: {e}")
         
         # Sync mapped fields
         mapping = CHANGE_REQUEST_TO_DYDX_MAPPING if board_type == 'change_request' else SUPPORT_TO_DYDX_MAPPING
@@ -1205,77 +1171,63 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             val = field_values.get(source_field)
             if val:
                 try:
-                    self.clients.dydx_client.update_card_field(dydx_card_id, dydx_field, val)
+                    self.dydx_client.update_card_field(dydx_card_id, dydx_field, val)
                 except Exception as e:
-                    logger.warning(f"Failed to sync field {dydx_field}: {e}")
+                    logger.error(f"Failed to sync field {dydx_field} for DYDX card {dydx_card_id}: {e}")
 
         # Sync phase info
-        phase_name = source_card.get('current_phase', {}).get('name')
-        phase_id = source_card.get('current_phase', {}).get('id')
-        if phase_name:
-            try:
-                self.clients.dydx_client.update_card_field(dydx_card_id, 'main_task_status_name', phase_name)
-            except Exception: pass
-        if phase_id:
-            try:
-                self.clients.dydx_client.update_card_field(dydx_card_id, 'main_task_status_id', phase_id)
-            except Exception: pass
+        self._update_phase_tracking(dydx_card_id, source_card)
         
         # Sync labels/priority
         try:
             labels = self.get_combined_labels(source_card, field_values)
             if labels:
                 self._set_card_labels(dydx_card_id, labels)
-                logger.info(f"Synced labels and priority: {labels}")
 
             priority_value = self._get_priority_label_id_from_source(source_card)
             if priority_value:
-                self.clients.dydx_client.update_card_field(dydx_card_id, 'priority', str(priority_value))
+                self.dydx_client.update_card_field(dydx_card_id, 'priority', str(priority_value))
         except Exception as e:
-            logger.warning(f"Failed to sync labels/priority: {e}")
+            logger.error(f"Failed to sync labels/priority for DYDX card {dydx_card_id}: {e}")
         
         # Sync due date
         try:
             date_val = self.get_source_due_date(source_card, field_values)
             if date_val:
-                self.clients.dydx_client.update_card_due_date(dydx_card_id, date_val)
+                self.dydx_client.update_card_due_date(dydx_card_id, date_val)
                 clean_date = date_val.replace('Z', '')
-                self.clients.dydx_client.update_card_field(dydx_card_id, 'due_date', clean_date)
-                self.clients.dydx_client.update_card_field(dydx_card_id, 'estimated_completion_date', clean_date)
+                self.dydx_client.update_card_field(dydx_card_id, 'due_date', clean_date)
+                self.dydx_client.update_card_field(dydx_card_id, 'estimated_completion_date', clean_date)
         except Exception as e:
-            logger.warning(f"Failed to sync due date: {e}")
+            logger.error(f"Failed to sync due date for DYDX card {dydx_card_id}: {e}")
     
     # ============================================
     # PER-ASSIGNEE SYNC LOGIC
     # ============================================
     
-    def sync_assignees_to_dydx(self, source_card_id: str, board_type: str, target_phase: str = None, enable_move: bool = False, is_move_event: bool = False) -> Dict:
+    def sync_assignees_to_dydx(self, source_card_id: str, board_type: str, target_phase: str = None, enable_move: bool = False, is_move_event: bool = False, source_card: Dict = None) -> Dict:
         """
         Core method for per-assignee sync (Mediamark → DYDX).
         Creates/closes/moves DYDX cards based on source card assignees.
         """
-        logger.info(f"sync_assignees_to_dydx called for source_card_id={source_card_id} (is_move_event={is_move_event})")
-        
         sync_lock = self._get_sync_lock(source_card_id)
         
         if not sync_lock.acquire(blocking=False):
-            logger.info(f" Sync already in progress for {source_card_id}, skipping")
             return {'status': 'skipped_locked', 'created': [], 'closed': [], 'synced': []}
         
         try:
             if self._should_skip_sync(source_card_id):
                 return {'status': 'skipped_dedup', 'created': [], 'closed': [], 'synced': []}
             
-            # Fetch source card from Mediamark
-            source_data = self.clients.mediamark_client.get_card(source_card_id)
-            source_card = source_data['data']['card']
+            # Fetch source card from Mediamark (skip if already provided)
+            if source_card is None:
+                source_data = self.mediamark_client.get_card(source_card_id)
+                source_card = source_data['data']['card']
             field_values = self.extract_field_values(source_card)
             
             source_phase = source_card.get('current_phase', {}).get('name', '')
             correct_dydx_phase = target_phase or self._get_correct_dydx_phase(source_phase)
             is_backlog = 'backlog' in correct_dydx_phase.lower()
-            
-            logger.info(f" Source card: '{source_card.get('title')}' in phase '{source_phase}' → DYDX phase '{correct_dydx_phase}'")
             
             # Source card assignee IDs belong to the Mediamark org.
             # For diffing against existing DYDX cards we must compare
@@ -1303,28 +1255,22 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
             # Ghost assignee handling
             if is_move_event and not current_assignee_ids and existing_dydx_cards:
-                logger.info(" Ghost Assignee Check: Empty assignee list during move. Preserving existing DYDX assignees.")
                 current_assignee_ids = set(dydx_cards_by_assignee.keys())
         
             if not current_assignee_ids:
                 if self.fallback_assignee_id:
-                    logger.info(f"No resolvable source assignee. Using fallback assignee {self.fallback_assignee_name} ({self.fallback_assignee_id})")
+                    logger.info(f"MM card {source_card_id}: no assignee resolved, using fallback {self.fallback_assignee_name}")
                     current_assignee_ids = {str(self.fallback_assignee_id)}
                 elif existing_dydx_cards:
-                    logger.info("No resolvable source assignee and no configured fallback. Preserving existing DYDX assignees.")
                     current_assignee_ids = set(dydx_cards_by_assignee.keys())
                 else:
-                    logger.warning("No resolvable assignee from source card and no fallback assignee available. Skipping create/sync.")
+                    logger.warning(f"MM card {source_card_id}: no assignee and no fallback, skipping")
                     return {'status': 'no_assignable_assignees', 'created': [], 'closed': [], 'synced': [], 'migrated': [], 'moved': []}
-        
-            logger.info(f" Final effective DYDX assignees: {current_assignee_ids}")
         
             # Close cards without assignees
             for old_card in cards_without_assignee:
                 if not old_card or not old_card.get('id'):
-                    logger.warning("Skipping invalid card entry while migrating unassigned cards")
                     continue
-                logger.info(f"Migrating old card {old_card['id']} (no assignee) → closing")
                 self.close_dydx_card(old_card['id'], source_card)
                 result['migrated'].append(old_card['id'])
         
@@ -1332,26 +1278,19 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             new_assignees = current_assignee_ids - existing_assignee_ids
             removed_assignees = existing_assignee_ids - current_assignee_ids
         
-            logger.info(f" New: {new_assignees}, Removed: {removed_assignees}")
-        
-            # Create cards for new assignees
+            # Create cards for new assignees (skip redundant duplicate scan — already checked above)
             for assignee_id in new_assignees:
-                assignee_name = self._get_user_name_by_id(assignee_id)
-                logger.info(f" Creating card for new assignee: {assignee_name} ({assignee_id})")
-                new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase)
+                new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase, skip_duplicate_check=True)
                 if new_card and new_card.get('id'):
                     result['created'].append(new_card['id'])
                 else:
-                    logger.warning(f"No card returned for assignee {assignee_id}; skipping created append")
+                    logger.warning(f"MM card {source_card_id}: no DYDX card created for assignee {assignee_id}")
         
             # Close cards for removed assignees
             for assignee_id in removed_assignees:
                 dydx_card = dydx_cards_by_assignee[assignee_id]
                 if not dydx_card or not dydx_card.get('id'):
-                    logger.warning(f"Skipping invalid DYDX card for removed assignee {assignee_id}")
                     continue
-                assignee_name = self._get_user_name_by_id(assignee_id)
-                logger.info(f" Closing card for removed assignee: {assignee_name} ({assignee_id})")
                 self.close_dydx_card(dydx_card['id'], source_card)
                 result['closed'].append(dydx_card['id'])
         
@@ -1360,35 +1299,35 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             for assignee_id in remaining_assignees:
                 dydx_card = dydx_cards_by_assignee[assignee_id]
                 if not dydx_card or not dydx_card.get('id'):
-                    logger.warning(f"Skipping invalid DYDX card for remaining assignee {assignee_id}")
                     continue
                 dydx_phase = dydx_card.get('current_phase', {}).get('name', '').lower()
             
                 if correct_dydx_phase.lower() not in dydx_phase and dydx_phase not in correct_dydx_phase.lower():
                     if enable_move:
-                        logger.info(f" Moving card {dydx_card['id']} from '{dydx_phase}' to '{correct_dydx_phase}'")
                         target_phase_id = self.dydx_phases.get(correct_dydx_phase.lower())
                         if target_phase_id:
                             try:
-                                self.clients.dydx_client.move_card_to_phase(dydx_card['id'], target_phase_id)
-                                self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id)
+                                self.dydx_client.move_card_to_phase(dydx_card['id'], target_phase_id)
+                                logger.info(f"Moved DYDX card {dydx_card['id']}: '{dydx_phase}' → '{correct_dydx_phase}' (MM card {source_card_id})")
+                                # On moves: only update phase tracking fields, skip full field sync
+                                self._update_phase_tracking(dydx_card['id'], source_card)
                                 result['moved'].append(dydx_card['id'])
                             except Exception as e:
-                                logger.warning(f" Move failed for {dydx_card['id']}: {e}")
-                                logger.info(f"Fallback: closing old card and creating new in '{correct_dydx_phase}'")
+                                logger.error(f"Move failed for DYDX card {dydx_card['id']} (MM card {source_card_id}): {e}")
                                 self.close_dydx_card(dydx_card['id'], source_card)
                                 new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase)
                                 result['closed'].append(dydx_card['id'])
-                                result['created'].append(new_card['id'])
+                                if new_card and new_card.get('id'):
+                                    result['created'].append(new_card['id'])
                     else:
-                        logger.info(
-                            f" Card {dydx_card['id']} is in '{dydx_phase}' but target is '{correct_dydx_phase}'. "
-                            "Move is disabled for this event; syncing fields only."
-                        )
-                        self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id)
+                        if not is_move_event:
+                            self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id)
+                        else:
+                            self._update_phase_tracking(dydx_card['id'], source_card)
                         result['synced'].append(dydx_card['id'])
                 else:
-                    self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id)
+                    if not is_move_event:
+                        self._sync_card_fields(dydx_card['id'], source_card, field_values, board_type, target_assignee_id=assignee_id)
                     result['synced'].append(dydx_card['id'])
         
             self._record_sync(source_card_id)
@@ -1399,13 +1338,11 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
 
     def _handle_field_update(self, source_card_id: str, board_type: str) -> Dict:
         """Handle field updates with duplicate and loop prevention."""
-        logger.info(f" _handle_field_update called for source_card_id={source_card_id}, board_type={board_type}")
-        
         if not self._start_processing(source_card_id):
             return {'updated': False, 'reason': 'already_processing'}
         
         try:
-            source_data = self.clients.mediamark_client.get_card(source_card_id)
+            source_data = self.mediamark_client.get_card(source_card_id)
             source_card = source_data['data']['card']
             current_phase = source_card.get('current_phase', {}).get('name', '')
             
@@ -1426,35 +1363,31 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     target_phase = None
                     enable_move = False
                 
-                result = self.sync_assignees_to_dydx(source_card_id, board_type, target_phase=target_phase, enable_move=enable_move, is_move_event=False)
+                result = self.sync_assignees_to_dydx(source_card_id, board_type, target_phase=target_phase, enable_move=enable_move, is_move_event=False, source_card=source_card)
             else:
                 if self._phase_matches(current_phase, self.CR_COMPLETED_PHASES):
-                    logger.info(f" CR in Completed phase - closing all cards")
                     all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
                     for dydx_card in all_cards:
                         self.close_dydx_card(dydx_card['id'], source_card)
                     result = {'closed': [c['id'] for c in all_cards], 'created': [], 'synced': []}
                 
                 elif self._phase_matches(current_phase, self.CR_CANCELLED_PHASES):
-                    logger.info(f" CR in Cancelled phase - moving all cards to cancelled")
                     all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
                     cancelled_phase_id = self.dydx_phases.get('cancelled')
                     for dydx_card in all_cards:
                         try:
-                            self.clients.dydx_client.move_card_to_phase(dydx_card['id'], cancelled_phase_id)
+                            self.dydx_client.move_card_to_phase(dydx_card['id'], cancelled_phase_id)
                         except Exception as e:
                             if "already in the destination phase" not in str(e):
-                                logger.error(f"Failed to move to cancelled: {e}")
+                                logger.error(f"Failed to move DYDX card {dydx_card['id']} to cancelled (MM card {source_card_id}): {e}")
                     result = {'cancelled': [c['id'] for c in all_cards], 'created': [], 'synced': []}
                 
                 elif self._is_excluded_cr_phase(current_phase):
-                    logger.info(f" CR in excluded phase '{current_phase}' - no action")
                     result = {'status': 'excluded', 'created': [], 'synced': []}
                 
                 else:
                     correct_dydx_phase = self._get_correct_dydx_phase(current_phase)
-                    logger.info(f" CR in '{current_phase}' → DYDX '{correct_dydx_phase}'")
-                    result = self.sync_assignees_to_dydx(source_card_id, board_type, target_phase=correct_dydx_phase, enable_move=True, is_move_event=False)
+                    result = self.sync_assignees_to_dydx(source_card_id, board_type, target_phase=correct_dydx_phase, enable_move=True, is_move_event=False, source_card=source_card)
             
             return {'updated': True, 'result': result}
         
@@ -1522,7 +1455,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         if not all_cards: 
             return {'status': 'no_cards_found'}
         
-        source_data = self.clients.mediamark_client.get_card(source_card_id)
+        source_data = self.mediamark_client.get_card(source_card_id)
         source_card = source_data['data']['card']
         
         closed_ids = []
@@ -1590,7 +1523,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """Route a Change Request webhook to the correct handler."""
         if not current_phase and action in ['card.move', 'card.field_update', 'card.update']:
              try:
-                source_data = self.clients.mediamark_client.get_card(source_card_id)
+                source_data = self.mediamark_client.get_card(source_card_id)
                 current_phase = source_data['data']['card'].get('current_phase', {}).get('name', '')
              except: pass
 
@@ -1612,7 +1545,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
 
     def handle_cr_creation(self, source_card_id):
         """Handle Change Request card creation from Mediamark."""
-        source_data = self.clients.mediamark_client.get_card(source_card_id)
+        source_data = self.mediamark_client.get_card(source_card_id)
         source_card = source_data['data']['card']
         phase = source_card.get('current_phase', {}).get('name', '')
         
@@ -1620,9 +1553,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             return {'status': 'excluded'}
         
         target_phase = self._get_correct_dydx_phase(phase)
-        
-        logger.info(f" CR Creation in phase '{phase}' → DYDX '{target_phase}'")
-        result = self.sync_assignees_to_dydx(source_card_id, 'change_request', target_phase=target_phase)
+        result = self.sync_assignees_to_dydx(source_card_id, 'change_request', target_phase=target_phase, source_card=source_card)
         return {'status': 'created', **result}
 
     def handle_cr_phase_transition(self, source_card_id: str, current_phase: str, previous_phase: str) -> Dict:
@@ -1631,7 +1562,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             return {'status': 'already_processing'}
         
         try:
-            source_data = self.clients.mediamark_client.get_card(source_card_id)
+            source_data = self.mediamark_client.get_card(source_card_id)
             source_card = source_data['data']['card']
             field_values = self.extract_field_values(source_card)
             
@@ -1640,59 +1571,47 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             actual_phase_id = actual_phase_obj.get('id', '')
             
             if actual_phase_name and actual_phase_name.lower() != (current_phase or '').lower():
-                logger.info(f" Webhook phase '{current_phase}' differs from actual '{actual_phase_name}' - using actual")
                 current_phase = actual_phase_name
             
-            logger.info(f" CR Phase Transition: '{previous_phase}' → '{current_phase}'")
-            
             if not self._has_phase_changed(source_card_id, actual_phase_name, actual_phase_id):
-                logger.info(f" Phase hasn't changed from last check - skipping")
                 return {'status': 'no_phase_change'}
             
             # CANCELLED
             if self._phase_matches(current_phase, self.CR_CANCELLED_PHASES):
                 all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
                 for dydx_card in all_cards:
-                    self._sync_card_fields(dydx_card['id'], source_card, field_values, 'change_request')
                     target_phase_id = self.dydx_phases.get('cancelled')
                     try:
-                        self.clients.dydx_client.move_card_to_phase(dydx_card['id'], target_phase_id)
+                        self.dydx_client.move_card_to_phase(dydx_card['id'], target_phase_id)
                     except Exception as e:
                         if "already in the destination phase" not in str(e):
-                            logger.error(f"Failed to move to cancelled: {e}")
+                            logger.error(f"Failed to move DYDX card {dydx_card['id']} to cancelled (MM card {source_card_id}): {e}")
                 return {'status': 'cancelled', 'cards_cancelled': len(all_cards)}
 
             # COMPLETED
             if self._phase_matches(current_phase, self.CR_COMPLETED_PHASES):
                 all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
                 for dydx_card in all_cards:
-                    self._sync_card_fields(dydx_card['id'], source_card, field_values, 'change_request')
                     self.close_dydx_card(dydx_card['id'], source_card)
                 return {'status': 'completed', 'cards_closed': len(all_cards)}
 
             # CLIENT APPROVAL (excluded)
             if self._is_excluded_cr_phase(current_phase):
-                logger.info(f" Skipping excluded phase: {current_phase}")
                 return {'status': 'excluded_phase'}
 
             target_dydx_phase = self._get_correct_dydx_phase(current_phase)
             
             all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
-            cards_with_correct_status = []
             cards_with_wrong_status = []
             
             for card in all_cards:
-                if self._dydx_card_matches_source_phase(card, current_phase):
-                    cards_with_correct_status.append(card)
-                else:
+                if not self._dydx_card_matches_source_phase(card, current_phase):
                     cards_with_wrong_status.append(card)
             
             for card in cards_with_wrong_status:
                 self.close_dydx_card(card['id'], source_card)
-                logger.info(f" Closed card {card['id']} (wrong status)")
             
-            logger.info(f" Syncing assignees to '{target_dydx_phase}'")
-            result = self.sync_assignees_to_dydx(source_card_id, 'change_request', target_phase=target_dydx_phase, enable_move=True, is_move_event=True)
+            result = self.sync_assignees_to_dydx(source_card_id, 'change_request', target_phase=target_dydx_phase, enable_move=True, is_move_event=True, source_card=source_card)
             result['closed_wrong_status'] = [c['id'] for c in cards_with_wrong_status]
             return {'status': 'synced', 'target_phase': target_dydx_phase, **result}
         
@@ -1721,7 +1640,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         try:
             while has_next:
                 variables = {'pipeId': self.dydx_pipe_id, 'after': cursor}
-                result = self.clients.dydx_client.execute_query(query, variables)
+                result = self.dydx_client.execute_query(query, variables)
                 
                 data = result.get('data', {}).get('cards', {})
                 edges = data.get('edges', [])
@@ -1739,7 +1658,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     
                     if source_card_id:
                         try:
-                            source_data = self.clients.mediamark_client.get_card(source_card_id)
+                            source_data = self.mediamark_client.get_card(source_card_id)
                             source_card = source_data.get('data', {}).get('card', {})
                             source_phase = source_card.get('current_phase', {}).get('name', '').lower()
                             

@@ -38,52 +38,84 @@ class PipefyClient:
             "Content-Type": "application/json",
             # sending JSON data in the request body.
         }
-    
-    def execute_query(self, query: str, variables: Dict = None) -> Dict:
-        # Build the request payload (body).
+
+    def _log_prefix(self) -> str:
+        return f"[{self.org_name}]" if self.org_name else "[pipefy]"
+
+    def _build_payload(self, query: str, variables: Optional[Dict] = None) -> Dict:
         payload = {"query": query}
-        
         if variables:
             payload["variables"] = variables
-            
-        for attempt in range(MAX_RETRIES):
+        return payload
+
+    def _post(self, payload: Dict) -> requests.Response:
+        return requests.post(
+            PIPEFY_API_URL,
+            json=payload,
+            headers=self.headers,
+            timeout=30,
+        )
+
+    def _get_error_message(self, result: Dict) -> str:
+        return result.get('errors', [{}])[0].get('message', 'Unknown GraphQL error')
+
+    def _is_rate_limit_error(self, error_message: str) -> bool:
+        error_text = error_message.lower()
+        return 'rate limit' in error_text or 'throttl' in error_text
+
+    def _raise_graphql_error(self, result: Dict) -> None:
+        error_msg = self._get_error_message(result)
+        logger.error(f"{self._log_prefix()} GraphQL error: {error_msg}")
+        logger.debug(f"{self._log_prefix()} Full error response: {json.dumps(result, indent=2)}")
+        raise Exception(f"GraphQL error ({self.org_name}): {error_msg}")
+
+    def _parse_response(self, response: requests.Response) -> Dict:
+        response.raise_for_status()
+        return response.json()
+
+    def _handle_request_exception(self, attempt: int, error: requests.exceptions.RequestException) -> None:
+        logger.warning(f"{self._log_prefix()} Request failed (attempt {attempt}/{MAX_RETRIES}): {error}")
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_DELAY)
+            return
+        raise Exception(f"API request failed after {MAX_RETRIES} attempts ({self.org_name}): {error}")
+
+    def _handle_rate_limit(self, attempt: int) -> None:
+        wait_time = RETRY_DELAY * attempt
+        logger.warning(f"{self._log_prefix()} Rate limited. Waiting {wait_time}s... (attempt {attempt}/{MAX_RETRIES})")
+        time.sleep(wait_time)
+    
+    def execute_query(self, query: str, variables: Dict = None) -> Dict:
+        payload = self._build_payload(query, variables)
+
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
-                response = requests.post(
-                    PIPEFY_API_URL,
-                    json=payload,
-                    headers=self.headers,
-                    timeout=30
-                    # Wait max 30 seconds for a response
-                )
-                
-                response.raise_for_status()
-                result = response.json()
-
+                response = self._post(payload)
+                result = self._parse_response(response)
                 if 'errors' in result:
-                    error_msg = result['errors'][0].get('message', 'Unknown GraphQL error')
-
-                    if 'rate limit' in error_msg.lower() or 'throttl' in error_msg.lower():
-                        wait_time = RETRY_DELAY * (attempt + 1)
-                        logger.warning(f"[{self.org_name}] Rate limited. Waiting {wait_time}s... (attempt {attempt + 1}/{MAX_RETRIES})")
-                        time.sleep(wait_time)
+                    error_message = self._get_error_message(result)
+                    if self._is_rate_limit_error(error_message) and attempt < MAX_RETRIES:
+                        self._handle_rate_limit(attempt)
                         continue
-                    
-                    # Not a rate limit error — log and raise
-                    logger.error(f"[{self.org_name}] GraphQL error: {error_msg}")
-                    logger.debug(f"[{self.org_name}] Full error response: {json.dumps(result, indent=2)}")
-                    raise Exception(f"GraphQL error ({self.org_name}): {error_msg}")
-                
+                    self._raise_graphql_error(result)
                 return result
-                
+
+            except requests.exceptions.HTTPError:
+                result = {}
+                try:
+                    result = response.json()
+                except ValueError:
+                    raise
+
+                error_message = self._get_error_message(result)
+                if self._is_rate_limit_error(error_message) and attempt < MAX_RETRIES:
+                    self._handle_rate_limit(attempt)
+                    continue
+                self._raise_graphql_error(result)
+
             except requests.exceptions.RequestException as e:
-                # Network errors (connection refused, timeout, DNS failure, etc.)
-                logger.warning(f"[{self.org_name}] Request failed (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY)
-                    # Wait before retrying. On the last attempt, we fall through to raise.
-                else:
-                    raise Exception(f"API request failed after {MAX_RETRIES} attempts ({self.org_name}): {e}")
-        
+                self._handle_request_exception(attempt, e)
+
         raise Exception(f"API request failed after {MAX_RETRIES} attempts ({self.org_name})")
     
 

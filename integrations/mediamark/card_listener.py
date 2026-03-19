@@ -24,6 +24,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from dotenv import load_dotenv
 
+from integrations.mediamark.field_mappings import MEDIAMARK_ACTIVE_PHASES, MEDIAMARK_TERMINAL_PHASES
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -56,37 +58,18 @@ class MediamarkCardChangeListener:
         self.card_assignees: Dict[str, Set[str]] = {}
         self.monitored_cards: Set[str] = set()
         self._last_processed: Dict[str, float] = {}
-        self._dedup_window = 5
+        self._dedup_window = 30  # seconds — longer than webhook processing to avoid double-processing
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         
-        # ---- Active phase lists ----
-        # Phases on the "Workflow Support" board that are considered active.
-        # Cards in these phases will be monitored for changes.
-        # Source: test_connection_mediamark.py Step 5 — actual phase names from the board.
-        #
-        # Active (monitored) phases:
-        #   NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL,
-        #   BACKLOG, IN PROGRESS, COMMS TO CLIENT, CHANGE REQUEST ON HOLD
-        #
-        # Terminal (NOT monitored — cards here are "done"):
-        #   RESOLVED, NOT APPROVED
-        
-        self.active_phases = [
-            'new',
-            'review',
-            'escalated',
-            'sow and scoping',
-            'client approval',
-            'backlog',
-            'in progress',
-            'comms to client',
-            'change request on hold',
-        ]
-        
-        logger.info(f" MediamarkCardChangeListener initialized (poll interval: {self.poll_interval}s)")
+        logger.info(f"MediamarkCardChangeListener initialized (poll interval: {self.poll_interval}s)")
     
+    def mark_recently_processed(self, card_id: str):
+        """Mark a card as recently processed (e.g. by a webhook) to prevent duplicate polling."""
+        with self._lock:
+            self._last_processed[card_id] = time.time()
+
     def _get_card_assignees(self, card: Dict) -> Set[str]:
         """Extract assignee IDs from a card as a Set."""
         assignees = set()
@@ -110,12 +93,17 @@ class MediamarkCardChangeListener:
     
     def _is_active_phase(self, phase_name: str, board_type: str = 'support') -> bool:
         """Check if a phase is active (not a terminal/done phase)."""
-        if not phase_name: return True
+        if not phase_name:
+            return True
+
         phase_lower = phase_name.lower().strip()
-        # Terminal phases — cards here are finished, don't monitor them
-        if phase_lower in ('resolved', 'not approved'):
+        if phase_lower in MEDIAMARK_TERMINAL_PHASES:
             return False
-        return any(p == phase_lower or p in phase_lower or phase_lower in p for p in self.active_phases)
+
+        return any(
+            phase_lower == active_phase or active_phase in phase_lower or phase_lower in active_phase
+            for active_phase in MEDIAMARK_ACTIVE_PHASES
+        )
     
     def _fetch_active_cards(self, pipe_id: str, board_type: str) -> List[Dict]:
         """Fetch all active cards from a Mediamark pipe using pagination."""
@@ -161,7 +149,7 @@ class MediamarkCardChangeListener:
                 cursor = page_info.get('endCursor')
                 
         except Exception as e:
-            logger.error(f"Error fetching cards from Mediamark pipe {pipe_id}: {e}")
+            logger.error(f"Error fetching cards from Mediamark: {e}")
         
         return all_cards
     
@@ -223,7 +211,6 @@ class MediamarkCardChangeListener:
             for card_id in removed:
                 board_type = self.card_board_types.get(card_id)
                 if board_type:
-                    logger.info(f" Card {card_id} moved to completed phase - triggering final sync")
                     changes.append({
                         'card_id': card_id,
                         'board_type': board_type,
@@ -248,8 +235,6 @@ class MediamarkCardChangeListener:
             if current_time - last_time < self._dedup_window:
                 return
             self._last_processed[card_id] = current_time
-        
-        logger.info(f"CHANGE DETECTED: card {card_id} ({change.get('title', 'Untitled')[:30]})")
         
         if change.get('is_completion', False):
             # Card moved to Done — close all DYDX cards

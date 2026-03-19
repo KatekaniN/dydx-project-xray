@@ -9,9 +9,7 @@ Source board: Mediamark "Workflow Support" (pipe ID: 301684738)
 Destination board: DYDX "Development Tasks Management" (pipe ID: 306286881)
 """
 
-# ==========================================
 # HARDCODED VALUES
-# ==========================================
 # These are always the same for every card synced from Mediamark.
 
 HARDCODED_CLIENT_NAME = "Mediamark"
@@ -23,6 +21,23 @@ PROJECT_NAME_PREFIX = "Mediamark Integration"
 # Title prefixes — used as fallback if "Support request type" field is empty
 TITLE_PREFIX_CR = "CR"
 TITLE_PREFIX_SUPPORT = "Support"
+
+MEDIAMARK_ACTIVE_PHASES = [
+    'new',
+    'review',
+    'escalated',
+    'sow and scoping',
+    'client approval',
+    'backlog',
+    'in progress',
+    'comms to client',
+    'change request on hold',
+]
+
+MEDIAMARK_TERMINAL_PHASES = [
+    'resolved',
+    'not approved',
+]
 
 
 # ==========================================
