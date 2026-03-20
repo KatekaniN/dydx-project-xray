@@ -1030,8 +1030,14 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         self._record_creation(source_card_id, assignee_id, final_target_phase)
         
-        # Assignee is already set via the 'assignee' field in dydx_fields above.
-        # Calling set_card_assignees again would trigger a remove+add in Pipefy's activity log.
+        # The 'assignee' field_attribute only sets a custom field value.
+        # We must also call set_card_assignees to assign the person at the
+        # card level — this is what Pipefy returns in card.assignees and
+        # what sync_assignees_to_dydx uses to match existing cards.
+        try:
+            self.dydx_client.set_card_assignees(new_card['id'], [str(dydx_assignee_id)])
+        except Exception as e:
+            logger.warning(f"Failed to set card-level assignee on DYDX card {new_card['id']}: {e}")
         
         if final_target_phase:
             target_phase_id = self.dydx_phases.get(final_target_phase.lower())
@@ -1295,6 +1301,11 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     cards_without_assignee.append(card)
         
             result = {'created': [], 'closed': [], 'synced': [], 'migrated': [], 'moved': []}
+
+            logger.info(
+                f"MM card {source_card_id}: resolved DYDX assignee IDs = {current_assignee_ids}, "
+                f"existing DYDX cards = {[(c['id'], c.get('_assignee_id')) for c in existing_dydx_cards]}"
+            )
         
             # Ghost assignee handling
             if is_move_event and not current_assignee_ids and existing_dydx_cards:
@@ -1309,17 +1320,34 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 else:
                     logger.warning(f"MM card {source_card_id}: no assignee and no fallback, skipping")
                     return {'status': 'no_assignable_assignees', 'created': [], 'closed': [], 'synced': [], 'migrated': [], 'moved': []}
-        
-            # Close cards without assignees
-            for old_card in cards_without_assignee:
-                if not old_card or not old_card.get('id'):
+
+            # Adopt cards that have no card-level assignee — assign them
+            # to the first resolved DYDX user instead of closing them.
+            for orphan_card in cards_without_assignee:
+                if not orphan_card or not orphan_card.get('id'):
                     continue
-                self.close_dydx_card(old_card['id'], source_card)
-                result['migrated'].append(old_card['id'])
+                if current_assignee_ids:
+                    adopt_id = next(iter(current_assignee_ids))
+                    try:
+                        self.dydx_client.set_card_assignees(orphan_card['id'], [str(adopt_id)])
+                        logger.info(f"Adopted unassigned DYDX card {orphan_card['id']} → assignee {adopt_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to adopt DYDX card {orphan_card['id']}: {e}")
+                    # Treat as an existing card for this assignee
+                    dydx_cards_by_assignee[str(adopt_id)] = orphan_card
+                    result['migrated'].append(orphan_card['id'])
+                else:
+                    logger.warning(f"MM card {source_card_id}: unassigned DYDX card {orphan_card['id']} — no resolved assignee to adopt")
         
             existing_assignee_ids = set(dydx_cards_by_assignee.keys())
             new_assignees = current_assignee_ids - existing_assignee_ids
             removed_assignees = existing_assignee_ids - current_assignee_ids
+
+            logger.info(
+                f"MM card {source_card_id}: new_assignees={new_assignees}, "
+                f"removed_assignees={removed_assignees}, "
+                f"remaining={current_assignee_ids & existing_assignee_ids}"
+            )
         
             # Create cards for new assignees (skip redundant duplicate scan — already checked above)
             for assignee_id in new_assignees:
