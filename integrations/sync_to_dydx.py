@@ -987,13 +987,14 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             date_added_to_board = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
 
         # Assemble field values for DYDX card.
-        # NOTE: Do NOT include 'assignee' here — the field_attribute only
-        # sets a custom field, not card-level assignees.  Card-level
-        # assignees are set via set_card_assignees() after creation.
-        # Including it here causes Pipefy to log an add+remove cycle.
+        # 'assignee' must be in fields_attributes because the DYDX board
+        # marks it as a required start-form field. Card-level assignees
+        # are set atomically via the assignee_ids param on createCard,
+        # so there is no separate set_card_assignees call and no churn.
         dydx_fields = [
             {'field_id': 'task_name', 'field_value': title},
             {'field_id': 'priority', 'field_value': str(priority_value) if priority_value else '315707448'},
+            {'field_id': 'assignee', 'field_value': str(dydx_assignee_id)},
             {'field_id': 'partner', 'field_value': str(self.default_partner)},
             {'field_id': 'date_added_to_board', 'field_value': date_added_to_board},
             {'field_id': 'main_task_id', 'field_value': str(source_card_id)},
