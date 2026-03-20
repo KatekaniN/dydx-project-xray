@@ -84,7 +84,7 @@ DYDX_REQUEST_TYPE = "request_type"
 DYDX_SYSTEM = "system_name"
 DYDX_ADDITIONAL_INFO = "additional_info"
 DYDX_LINK = "link_to_issue"
-DYDX_ASSIGNEE = "assignee_select"
+DYDX_ASSIGNEE = "assignee"
 
 
 # ==========================================

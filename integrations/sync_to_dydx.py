@@ -1026,6 +1026,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         logger.info(
             f"Creating DYDX card for MM card {source_card_id} | "
+            f"assignee_id={dydx_assignee_id!r}, assignee_name={dydx_assignee_name!r}, "
             f"title='{title}', due_date={date_val}, "
             f"fields={json.dumps(dydx_fields, default=str)}"
         )
