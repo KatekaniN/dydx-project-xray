@@ -17,7 +17,8 @@ from integrations.field_mappings import (
     PROJECT_NAME_PREFIX, TITLE_PREFIX_CR, TITLE_PREFIX_SUPPORT,
     CR_DESCRIPTION_FIELD_PATTERNS, SUPPORT_DESCRIPTION_FIELD_PATTERNS,
     TYPE_OF_REQUEST_FIELD_PATTERNS, SYSTEM_FIELD_PATTERNS,
-    SUPPORT_REQUEST_TYPE_FIELD_PATTERNS, CR_REQUEST_TYPES
+    SUPPORT_REQUEST_TYPE_FIELD_PATTERNS, CR_REQUEST_TYPES,
+    DYDX_ASSIGNEE
 )
 
 logger = logging.getLogger(__name__)
@@ -994,7 +995,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         dydx_fields = [
             {'field_id': 'task_name', 'field_value': title},
             {'field_id': 'priority', 'field_value': str(priority_value) if priority_value else '315707448'},
-            {'field_id': 'assignee', 'field_value': str(dydx_assignee_id)},
+            {'field_id': DYDX_ASSIGNEE, 'field_value': str(dydx_assignee_id)},
             {'field_id': 'partner', 'field_value': str(self.default_partner)},
             {'field_id': 'date_added_to_board', 'field_value': date_added_to_board},
             {'field_id': 'main_task_id', 'field_value': str(source_card_id)},
