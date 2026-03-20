@@ -117,6 +117,10 @@ class QueueHandler(logging.Handler): # Custom logging handler that puts log mess
 logger = logging.getLogger(__name__) # __name__ is the name of the current module, so logs will be labeled with "app_mediamark" which helps identify where they come from in SolarWinds.
 logger.setLevel(logging.INFO) # Set the logging level to INFO where we ignore debug messages but capture info, warnings, and errors.
 
+# Suppress Werkzeug's default per-request access log (e.g. "POST /mediamark/events HTTP/1.0" 200)
+# Our own app-level logs already capture all the useful context.
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
 # Console logging
 console_handler = logging.StreamHandler() # Logs will also be printed to the console for local visibility when running the app directly.
 console_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
