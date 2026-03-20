@@ -148,23 +148,28 @@ class PipefyClient:
         return self.execute_query(query, {"cardId": card_id})
     
     def create_card(self, pipe_id: str, title: str, fields: List[Dict], 
-                    due_date: str = None) -> Dict:
+                    due_date: str = None, assignee_ids: List[str] = None) -> Dict:
         """
         Create a new card in a Pipefy pipe (board).
+        
+        assignee_ids sets card-level assignees atomically at creation time
+        (no add/remove churn in the activity log).
         """
         mutation = """
-        mutation CreateCard($pipeId: ID!, $title: String!, $fields: [FieldValueInput], $dueDate: DateTime) {
+        mutation CreateCard($pipeId: ID!, $title: String!, $fields: [FieldValueInput], $dueDate: DateTime, $assigneeIds: [ID]) {
             createCard(input: {
                 pipe_id: $pipeId
                 title: $title
                 fields_attributes: $fields
                 due_date: $dueDate
+                assignee_ids: $assigneeIds
             }) {
                 card {
                     id
                     title
                     url
                     current_phase { id name }
+                    assignees { id name }
                 }
             }
         }
@@ -176,6 +181,8 @@ class PipefyClient:
         }
         if due_date:
             variables["dueDate"] = due_date
+        if assignee_ids:
+            variables["assigneeIds"] = assignee_ids
         
         return self.execute_query(mutation, variables)
     

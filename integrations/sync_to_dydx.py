@@ -38,6 +38,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     SUPPORT_COMPLETED_PHASES = ['resolved']
     SUPPORT_IN_PROGRESS_PHASES = ['in progress', 'review', 'new']
     SUPPORT_BACKLOG_PHASES = ['backlog']
+    SUPPORT_ON_HOLD_PHASES = ['change request on hold']
     
     # --- CHANGE REQUEST (CR) phase groups ---
     CR_EXCLUDED_PHASES = ['client approval']
@@ -521,44 +522,46 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     if desc_value and desc_value != '[]' and desc_value != 'null':
                         return desc_value
         
-    def get_combined_labels(self, card_data: Dict, field_values: Dict) -> List[str]:
-        """Map source card labels to DYDX priority label IDs."""
+    def get_combined_labels(self, card_data: Dict, field_values: Dict, source_phase: str = '') -> List[str]:
+        """Map Mediamark labels → DYDX labels.
+
+        MM Label         → DYDX Label
+        ────────────────────────────────
+        Low              → Low
+        Important        → High
+        System critical  → Very High
+
+        Additionally, when the MM card is in the "Change request on hold"
+        phase, the DYDX "On Hold" label is applied.
+        """
         labels_to_apply = []
         source_labels = card_data.get('labels', [])
         has_priority = False
-        
+
         for label in source_labels:
-            l_name = label['name'].lower()
-            if 'hold' in l_name and 'on_hold' in self.priority_labels:
-                labels_to_apply.append(self.priority_labels['on_hold'])
-            if 'high' in l_name or 'urgent' in l_name:
-                if 'very_high' in self.priority_labels:
-                    labels_to_apply.append(self.priority_labels['very_high'])
-                    has_priority = True
-            elif 'med' in l_name:
-                if 'high' in self.priority_labels:
-                    labels_to_apply.append(self.priority_labels['high'])
-                    has_priority = True
-            elif 'low' in l_name:
-                if 'low' in self.priority_labels:
+            l_name = (label.get('name') or '').strip().lower()
+
+            if l_name == 'low':
+                if self.priority_labels.get('low'):
                     labels_to_apply.append(self.priority_labels['low'])
                     has_priority = True
+            elif l_name == 'important':
+                if self.priority_labels.get('high'):
+                    labels_to_apply.append(self.priority_labels['high'])
+                    has_priority = True
+            elif 'system critical' in l_name:
+                if self.priority_labels.get('very_high'):
+                    labels_to_apply.append(self.priority_labels['very_high'])
+                    has_priority = True
 
-        if not has_priority:
-            size_value = field_values.get('estimated_update_size', '')
-            if isinstance(size_value, list): size_value = size_value[0] if size_value else ''
-            size_str = str(size_value).lower()
-            if any(x in size_str for x in ['large', 'xl', 'big']):
-                if 'very_high' in self.priority_labels: labels_to_apply.append(self.priority_labels['very_high'])
-            elif any(x in size_str for x in ['medium', 'med']):
-                if 'high' in self.priority_labels: labels_to_apply.append(self.priority_labels['high'])
-            elif any(x in size_str for x in ['small', 'xs']):
-                if 'low' in self.priority_labels: labels_to_apply.append(self.priority_labels['low'])
+        # Default to Low if no priority label matched
+        if not has_priority and self.priority_labels.get('low'):
+            labels_to_apply.append(self.priority_labels['low'])
 
-        if not labels_to_apply or all(l == self.priority_labels.get('on_hold') for l in labels_to_apply):
-            if 'low' in self.priority_labels:
-                has_actual = any(l in [self.priority_labels.get('low'), self.priority_labels.get('high'), self.priority_labels.get('very_high')] for l in labels_to_apply)
-                if not has_actual: labels_to_apply.append(self.priority_labels['low'])
+        # "Change request on hold" phase → add On Hold label
+        if source_phase and 'change request on hold' in source_phase.lower():
+            if self.priority_labels.get('on_hold'):
+                labels_to_apply.append(self.priority_labels['on_hold'])
 
         return list(set(labels_to_apply))
     
@@ -825,26 +828,24 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         return None, ''
 
     def _get_priority_label_id_from_source(self, source_card: Dict) -> Optional[str]:
-        """Resolve priority from source card labels (Low/High/Very high)."""
-        # Priority is taken from source card labels by requirement.
-        # If no matching label is present, default to low.
+        """Map MM label → DYDX label ID for the priority field.
+
+        Low             → Low
+        Important       → High
+        System critical → Very High
+        Default         → Low
+        """
         labels = source_card.get('labels', []) or []
         for label in labels:
             name = (label.get('name') or '').strip().lower()
-            if 'very high' in name and self.priority_labels.get('very_high'):
+            if 'system critical' in name and self.priority_labels.get('very_high'):
                 return self.priority_labels['very_high']
-            if name == 'high' and self.priority_labels.get('high'):
+            if name == 'important' and self.priority_labels.get('high'):
                 return self.priority_labels['high']
             if name == 'low' and self.priority_labels.get('low'):
                 return self.priority_labels['low']
 
-        if self.priority_labels.get('low'):
-            return self.priority_labels['low']
-        if self.priority_labels.get('high'):
-            return self.priority_labels['high']
-        if self.priority_labels.get('very_high'):
-            return self.priority_labels['very_high']
-        return None
+        return self.priority_labels.get('low')
     
     # ============================================
     # FIND EXISTING DYDX CARDS
@@ -1029,21 +1030,25 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         result = self.dydx_client.create_card(
             self.dydx_pipe_id, 
             title, 
-            dydx_fields
+            dydx_fields,
+            assignee_ids=[str(dydx_assignee_id)]
         )
         new_card = result['data']['createCard']['card']
         logger.info(f"Created DYDX card {new_card['id']} for MM card {source_card_id} (assignee={dydx_assignee_name}, phase={final_target_phase})")
         
         self._record_creation(source_card_id, assignee_id, final_target_phase)
         
-        # The 'assignee' field_attribute only sets a custom field value.
-        # We must also call set_card_assignees to assign the person at the
-        # card level — this is what Pipefy returns in card.assignees and
-        # what sync_assignees_to_dydx uses to match existing cards.
+        # Card-level assignees are set atomically via assignee_ids in the
+        # createCard mutation above. Do NOT call set_card_assignees here —
+        # that would REPLACE all assignees causing a remove+add cycle.
+        
+        # Set labels (priority + on-hold if applicable)
         try:
-            self.dydx_client.set_card_assignees(new_card['id'], [str(dydx_assignee_id)])
+            labels = self.get_combined_labels(source_card, field_values, source_phase=current_phase_name)
+            if labels:
+                self._set_card_labels(new_card['id'], labels)
         except Exception as e:
-            logger.warning(f"Failed to set card-level assignee on DYDX card {new_card['id']}: {e}")
+            logger.warning(f"Failed to set labels on new DYDX card {new_card['id']}: {e}")
         
         if final_target_phase:
             target_phase_id = self.dydx_phases.get(final_target_phase.lower())
@@ -1533,6 +1538,50 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         )
         return {'status': 'backlog_updated', **result}
 
+    def handle_support_on_hold(self, source_card_id: str) -> Dict:
+        """Handle 'Change request on hold' phase: move to backlog and add On Hold label."""
+        all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
+        if not all_cards:
+            # No existing cards — create via normal backlog flow, labels will include On Hold
+            result = self.sync_assignees_to_dydx(
+                source_card_id, 'support_ticket',
+                target_phase='backlog', enable_move=True, is_move_event=True
+            )
+            return {'status': 'on_hold_created', **result}
+
+        moved_ids = []
+        for dydx_card in all_cards:
+            card_id = dydx_card.get('id')
+            if not card_id:
+                continue
+
+            # Move to backlog if not already there
+            dydx_phase = dydx_card.get('current_phase', {}).get('name', '').lower()
+            if 'backlog' not in dydx_phase:
+                target_phase_id = self.dydx_phases.get('backlog')
+                if target_phase_id:
+                    try:
+                        self.dydx_client.move_card_to_phase(card_id, target_phase_id)
+                    except Exception as e:
+                        if 'already in the destination phase' not in str(e):
+                            logger.error(f"Failed to move DYDX card {card_id} to backlog: {e}")
+
+            # Add On Hold label (preserve existing labels)
+            if self.priority_labels.get('on_hold'):
+                current_labels = [str(l['id']) for l in dydx_card.get('labels', [])]
+                on_hold_id = self.priority_labels['on_hold']
+                if on_hold_id not in current_labels:
+                    current_labels.append(on_hold_id)
+                    try:
+                        self._set_card_labels(card_id, current_labels)
+                        logger.info(f"DYDX card {card_id}: added On Hold label")
+                    except Exception as e:
+                        logger.error(f"Failed to set On Hold label on DYDX card {card_id}: {e}")
+
+            moved_ids.append(card_id)
+
+        return {'status': 'on_hold', 'updated_cards': moved_ids}
+
     def process_support_webhook(self, source_card_id: str, action: str, current_phase: str = None, previous_phase: str = None) -> Dict:
         """Route a support board webhook to the correct handler."""
         if action == 'card.create': 
@@ -1562,6 +1611,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             if self._phase_matches(phase, self.SUPPORT_BACKLOG_PHASES):
                 raw = self.handle_support_backlog_update(source_card_id)
                 return self._format_action_result(action, raw, default_status='backlog_updated')
+            if self._phase_matches(phase, self.SUPPORT_ON_HOLD_PHASES):
+                raw = self.handle_support_on_hold(source_card_id)
+                return self._format_action_result(action, raw, default_status='on_hold')
             raw = self.sync_assignees_to_dydx(source_card_id, 'support_ticket', is_move_event=True)
             return self._format_action_result(action, raw, default_status='moved')
         
