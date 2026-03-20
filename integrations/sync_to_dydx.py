@@ -985,11 +985,14 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         else:
             date_added_to_board = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
 
-        # Assemble field values for DYDX card
+        # Assemble field values for DYDX card.
+        # NOTE: Do NOT include 'assignee' here — the field_attribute only
+        # sets a custom field, not card-level assignees.  Card-level
+        # assignees are set via set_card_assignees() after creation.
+        # Including it here causes Pipefy to log an add+remove cycle.
         dydx_fields = [
             {'field_id': 'task_name', 'field_value': title},
             {'field_id': 'priority', 'field_value': str(priority_value) if priority_value else '315707448'},
-            {'field_id': 'assignee', 'field_value': str(dydx_assignee_id)},  # required at creation
             {'field_id': 'partner', 'field_value': str(self.default_partner)},
             {'field_id': 'date_added_to_board', 'field_value': date_added_to_board},
             {'field_id': 'main_task_id', 'field_value': str(source_card_id)},
@@ -1004,6 +1007,10 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         if source_card.get('url'):
             dydx_fields.append({'field_id': 'main_task_link', 'field_value': f"### [Open Task]({source_card['url']})"})
 
+        # Set due_date and estimated_completion_date via fields_attributes
+        # only. Do NOT also pass due_date as the mutation parameter —
+        # that would set it twice and Pipefy logs each as a separate
+        # "updated Due Date" activity entry.
         if date_val:
             clean_date = date_val.replace('Z', '')
             dydx_fields.append({'field_id': 'due_date', 'field_value': clean_date})
@@ -1022,8 +1029,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         result = self.dydx_client.create_card(
             self.dydx_pipe_id, 
             title, 
-            dydx_fields, 
-            due_date=date_val
+            dydx_fields
         )
         new_card = result['data']['createCard']['card']
         logger.info(f"Created DYDX card {new_card['id']} for MM card {source_card_id} (assignee={dydx_assignee_name}, phase={final_target_phase})")
