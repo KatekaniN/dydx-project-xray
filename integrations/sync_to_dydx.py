@@ -1403,6 +1403,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 dydx_card = dydx_cards_by_assignee[assignee_id]
                 if not dydx_card or not dydx_card.get('id'):
                     continue
+                dydx_card_id = dydx_card['id']
                 dydx_phase = dydx_card.get('current_phase', {}).get('name', '').lower()
             
                 if correct_dydx_phase.lower() not in dydx_phase and dydx_phase not in correct_dydx_phase.lower():
@@ -1410,25 +1411,39 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                         target_phase_id = self.dydx_phases.get(correct_dydx_phase.lower())
                         if target_phase_id:
                             try:
-                                self.dydx_client.move_card_to_phase(dydx_card['id'], target_phase_id)
-                                logger.info(f"Moved DYDX card {dydx_card['id']}: '{dydx_phase}' → '{correct_dydx_phase}' (MM card {source_card_id})")
-                                result['moved'].append(dydx_card['id'])
+                                self.dydx_client.move_card_to_phase(dydx_card_id, target_phase_id)
+                                logger.info(f"Moved DYDX card {dydx_card_id}: '{dydx_phase}' → '{correct_dydx_phase}' (MM card {source_card_id})")
+                                result['moved'].append(dydx_card_id)
                             except Exception as e:
-                                logger.error(f"Move failed for DYDX card {dydx_card['id']} (MM card {source_card_id}): {e}")
-                                self.close_dydx_card(dydx_card['id'], source_card)
+                                logger.error(f"Move failed for DYDX card {dydx_card_id} (MM card {source_card_id}): {e}")
+                                self.close_dydx_card(dydx_card_id, source_card)
                                 new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase)
-                                result['closed'].append(dydx_card['id'])
+                                result['closed'].append(dydx_card_id)
                                 if new_card and new_card.get('id'):
                                     result['created'].append(new_card['id'])
                     # Phase doesn't match but move not enabled — just record as synced
                     else:
-                        result['synced'].append(dydx_card['id'])
+                        result['synced'].append(dydx_card_id)
                 else:
-                    # Phase already matches — nothing to do.
-                    # Fields were set at card creation and field-update
-                    # webhooks are intentionally ignored, so there is
-                    # never a reason to re-sync field values here.
-                    result['synced'].append(dydx_card['id'])
+                    result['synced'].append(dydx_card_id)
+
+                # On every move event, re-sync labels and priority from the
+                # MM card so changes made between moves are picked up.
+                if is_move_event:
+                    try:
+                        new_labels = self.get_combined_labels(source_card, field_values, source_phase=source_phase)
+                        current_label_ids = set(str(l['id']) for l in dydx_card.get('labels', []))
+                        if set(new_labels) != current_label_ids:
+                            self._set_card_labels(dydx_card_id, new_labels)
+                            logger.info(f"DYDX card {dydx_card_id}: updated labels {current_label_ids} → {set(new_labels)}")
+                    except Exception as e:
+                        logger.warning(f"DYDX card {dydx_card_id}: failed to sync labels: {e}")
+                    try:
+                        new_priority = self._get_priority_label_id_from_source(source_card)
+                        if new_priority:
+                            self.dydx_client.update_card_field(dydx_card_id, 'priority', str(new_priority))
+                    except Exception as e:
+                        logger.warning(f"DYDX card {dydx_card_id}: failed to sync priority field: {e}")
         
             self._record_sync(source_card_id, correct_dydx_phase)
             return result
