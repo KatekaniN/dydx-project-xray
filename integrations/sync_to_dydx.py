@@ -127,19 +127,25 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 self._sync_locks[source_card_id] = threading.Lock()
             return self._sync_locks[source_card_id]
     
-    def _should_skip_sync(self, source_card_id: str) -> bool:
-        """Check if we just synced this card (within dedup window)."""
+    def _should_skip_sync(self, source_card_id: str, target_phase: str = None) -> bool:
+        """Check if we just synced this card+phase combo (within dedup window).
+        
+        Phase-aware: a sync for 'in progress' does NOT block a later sync
+        for 'testing / comms' on the same card.
+        """
         current_time = time.time()
+        key = f"{source_card_id}:{(target_phase or '').lower()}"
         with self._lock_manager:
-            last_sync = self._sync_timestamps.get(source_card_id, 0)
+            last_sync = self._sync_timestamps.get(key, 0)
             if current_time - last_sync < self.SYNC_DEDUP_WINDOW:
                 return True
             return False
     
-    def _record_sync(self, source_card_id: str):
-        """Record that we just synced this card."""
+    def _record_sync(self, source_card_id: str, target_phase: str = None):
+        """Record that we just synced this card+phase combo."""
+        key = f"{source_card_id}:{(target_phase or '').lower()}"
         with self._lock_manager:
-            self._sync_timestamps[source_card_id] = time.time()
+            self._sync_timestamps[key] = time.time()
     
     def _was_recently_created(self, source_card_id: str, assignee_id: str, dydx_phase: str) -> bool:
         """Check if a card was recently created for this source/assignee/phase combo."""
@@ -1275,11 +1281,19 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """
         sync_lock = self._get_sync_lock(source_card_id)
         
-        if not sync_lock.acquire(blocking=False):
+        # For move events, wait for any in-flight sync to finish so the
+        # phase move actually happens.  For other events, skip if busy.
+        if is_move_event:
+            acquired = sync_lock.acquire(blocking=True, timeout=60)
+        else:
+            acquired = sync_lock.acquire(blocking=False)
+        if not acquired:
+            logger.info(f"MM card {source_card_id}: skipped (lock held), target='{target_phase}'")
             return {'status': 'skipped_locked', 'created': [], 'closed': [], 'synced': []}
         
         try:
-            if self._should_skip_sync(source_card_id):
+            if self._should_skip_sync(source_card_id, target_phase):
+                logger.debug(f"MM card {source_card_id}: skipping dedup for phase '{target_phase}'")
                 return {'status': 'skipped_dedup', 'created': [], 'closed': [], 'synced': []}
             
             # Fetch source card from Mediamark (skip if already provided)
@@ -1381,6 +1395,10 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
             # Sync/move remaining cards
             remaining_assignees = current_assignee_ids & existing_assignee_ids
+            logger.info(
+                f"MM card {source_card_id}: remaining_assignees={remaining_assignees}, "
+                f"target='{correct_dydx_phase}', enable_move={enable_move}"
+            )
             for assignee_id in remaining_assignees:
                 dydx_card = dydx_cards_by_assignee[assignee_id]
                 if not dydx_card or not dydx_card.get('id'):
@@ -1412,7 +1430,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     # never a reason to re-sync field values here.
                     result['synced'].append(dydx_card['id'])
         
-            self._record_sync(source_card_id)
+            self._record_sync(source_card_id, correct_dydx_phase)
             return result
             
         finally:
