@@ -392,7 +392,18 @@ def handle_pipefy_webhook():
 
         is_field_update = action in ('card.field_update', 'card.update')
 
-        # Log all actionable events with payload
+        # For field updates, only process assignee-related changes.
+        # Other field changes (deadlines, descriptions, etc.) don't need DYDX sync.
+        if is_field_update:
+            field_info = data.get('data', {}).get('field', {}) or data.get('field', {})
+            field_id = (field_info.get('id') or '').lower()
+            field_label = (field_info.get('label') or '').lower()
+            _assignee_kw = ('assignee', 'assign', 'responsible', 'owner', 'team member')
+            if not any(kw in field_id or kw in field_label for kw in _assignee_kw):
+                logger.debug(f"MM card {card_id}: ignoring {action} for non-assignee field '{field_info.get('id', '')}'")
+                return jsonify({'status': 'ignored', 'reason': 'non_assignee_field_update'}), 200
+
+        # Log all actionable events
         logger.info(f"MM card {card_id} received: action={action}, phase='{current_phase}'")
 
         # Since the webhook is registered only on the Mediamark support pipe, any event

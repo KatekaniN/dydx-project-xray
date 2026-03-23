@@ -1274,16 +1274,16 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     # PER-ASSIGNEE SYNC LOGIC
     # ============================================
     
-    def sync_assignees_to_dydx(self, source_card_id: str, board_type: str, target_phase: str = None, enable_move: bool = False, is_move_event: bool = False, source_card: Dict = None) -> Dict:
+    def sync_assignees_to_dydx(self, source_card_id: str, board_type: str, target_phase: str = None, enable_move: bool = False, is_move_event: bool = False, source_card: Dict = None, blocking_lock: bool = False) -> Dict:
         """
         Core method for per-assignee sync (Mediamark → DYDX).
         Creates/closes/moves DYDX cards based on source card assignees.
         """
         sync_lock = self._get_sync_lock(source_card_id)
         
-        # For move events, wait for any in-flight sync to finish so the
-        # phase move actually happens.  For other events, skip if busy.
-        if is_move_event:
+        # For move events and assignee changes, wait for any in-flight sync.
+        # For other events, skip if busy.
+        if is_move_event or blocking_lock:
             acquired = sync_lock.acquire(blocking=True, timeout=60)
         else:
             acquired = sync_lock.acquire(blocking=False)
@@ -1583,7 +1583,8 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """
         result = self.sync_assignees_to_dydx(
             source_card_id, board_type,
-            enable_move=False, is_move_event=False
+            enable_move=False, is_move_event=False,
+            blocking_lock=True
         )
         created = result.get('created', [])
         closed = result.get('closed', [])
