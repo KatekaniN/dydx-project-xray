@@ -1072,21 +1072,32 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
 
     def close_dydx_card(self, dydx_card_id: str, source_card: Dict = None) -> bool:
         """Close a DYDX card by moving it to the Done phase."""
+        card_data = None
         try:
             card = self.dydx_client.get_card(dydx_card_id)
-            current_phase_id = card.get('data', {}).get('card', {}).get('current_phase', {}).get('id')
+            card_data = card.get('data', {}).get('card', {})
+            current_phase_id = card_data.get('current_phase', {}).get('id')
             done_phase_id = self.dydx_phases.get('done')
             if current_phase_id and done_phase_id and current_phase_id == done_phase_id:
                 return True
         except Exception: pass
 
+        # Build lookup of current field values to avoid redundant writes
+        current_fields = {}
+        if card_data:
+            for f in card_data.get('fields', []):
+                fid = f.get('field', {}).get('id', '')
+                current_fields[fid] = str(f.get('value', '') or '')
+
         try:
-            self.dydx_client.update_card_field(dydx_card_id, 'test_environment', 'Production')
+            if current_fields.get('test_environment', '') != 'Production':
+                self.dydx_client.update_card_field(dydx_card_id, 'test_environment', 'Production')
         except Exception: pass
 
         try:
             today_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT09:00:00Z")
-            self.dydx_client.update_card_field(dydx_card_id, 'estimated_completion_date', today_str)
+            if self._normalize_date(current_fields.get('estimated_completion_date', '')) != self._normalize_date(today_str):
+                self.dydx_client.update_card_field(dydx_card_id, 'estimated_completion_date', today_str)
         except Exception: pass
         
         target_phase_id = self.dydx_phases.get('done')
@@ -1441,7 +1452,14 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     try:
                         new_priority = self._get_priority_label_id_from_source(source_card)
                         if new_priority:
-                            self.dydx_client.update_card_field(dydx_card_id, 'priority', str(new_priority))
+                            current_priority = ''
+                            for f in dydx_card.get('fields', []):
+                                if f.get('field', {}).get('id') == 'priority':
+                                    current_priority = str(f.get('value', '') or '')
+                                    break
+                            if str(new_priority) != current_priority:
+                                self.dydx_client.update_card_field(dydx_card_id, 'priority', str(new_priority))
+                                logger.info(f"DYDX card {dydx_card_id}: updated priority '{current_priority}' → '{new_priority}'")
                     except Exception as e:
                         logger.warning(f"DYDX card {dydx_card_id}: failed to sync priority field: {e}")
         
