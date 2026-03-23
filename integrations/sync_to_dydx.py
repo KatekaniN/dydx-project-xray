@@ -1438,17 +1438,14 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 else:
                     result['synced'].append(dydx_card_id)
 
-                # On every move event, re-sync labels and priority from the
-                # MM card so changes made between moves are picked up.
+                # On every move event, re-sync priority field and labels from
+                # the MM card so changes made between moves are picked up.
+                # IMPORTANT: update the priority FIELD first, then set card
+                # LABELS last.  Pipefy's label_select field is linked to
+                # card labels — updating the field can trigger Pipefy to
+                # recalculate labels.  By setting labels AFTER the field,
+                # _set_card_labels always has the final word.
                 if is_move_event:
-                    try:
-                        new_labels = self.get_combined_labels(source_card, field_values, source_phase=source_phase)
-                        current_label_ids = set(str(l['id']) for l in dydx_card.get('labels', []))
-                        if set(new_labels) != current_label_ids:
-                            self._set_card_labels(dydx_card_id, new_labels)
-                            logger.info(f"DYDX card {dydx_card_id}: updated labels {current_label_ids} → {set(new_labels)}")
-                    except Exception as e:
-                        logger.warning(f"DYDX card {dydx_card_id}: failed to sync labels: {e}")
                     try:
                         new_priority = self._get_priority_label_id_from_source(source_card)
                         if new_priority:
@@ -1462,6 +1459,14 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                                 logger.info(f"DYDX card {dydx_card_id}: updated priority '{current_priority}' → '{new_priority}'")
                     except Exception as e:
                         logger.warning(f"DYDX card {dydx_card_id}: failed to sync priority field: {e}")
+                    try:
+                        new_labels = self.get_combined_labels(source_card, field_values, source_phase=source_phase)
+                        current_label_ids = set(str(l['id']) for l in dydx_card.get('labels', []))
+                        if set(new_labels) != current_label_ids:
+                            self._set_card_labels(dydx_card_id, new_labels)
+                            logger.info(f"DYDX card {dydx_card_id}: updated labels {current_label_ids} → {set(new_labels)}")
+                    except Exception as e:
+                        logger.warning(f"DYDX card {dydx_card_id}: failed to sync labels: {e}")
         
             self._record_sync(source_card_id, correct_dydx_phase)
             return result
