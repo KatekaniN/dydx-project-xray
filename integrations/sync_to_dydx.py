@@ -1574,6 +1574,26 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         )
         return {'status': 'backlog_updated', **result}
 
+    def handle_assignee_change(self, source_card_id: str, board_type: str) -> Dict:
+        """Handle real-time assignee additions/removals on an MM card.
+
+        Fetches the current MM card, diffs assignees against existing DYDX
+        cards, creates cards for new assignees, and closes cards for
+        removed assignees.  Does NOT move cards between phases.
+        """
+        result = self.sync_assignees_to_dydx(
+            source_card_id, board_type,
+            enable_move=False, is_move_event=False
+        )
+        created = result.get('created', [])
+        closed = result.get('closed', [])
+        if created or closed:
+            logger.info(
+                f"MM card {source_card_id}: assignee change — "
+                f"created {len(created)} card(s), closed {len(closed)} card(s)"
+            )
+        return {'status': 'assignee_synced', **result}
+
     def handle_support_on_hold(self, source_card_id: str) -> Dict:
         """Handle 'Change request on hold' phase: move to backlog and add On Hold label."""
         all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
@@ -1625,8 +1645,8 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             return self._format_action_result(action, raw, default_status='created')
         
         if action in ['card.field_update', 'card.update']:
-            logger.debug(f"MM card {source_card_id}: ignoring {action} — field updates do not sync to DYDX")
-            return {'status': 'ignored', 'reason': 'field_updates_disabled'}
+            raw = self.handle_assignee_change(source_card_id, 'support_ticket')
+            return self._format_action_result(action, raw, default_status='assignee_synced')
         
         if action == 'card.move':
             phase = current_phase or ''
@@ -1676,8 +1696,8 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             return self._format_action_result(action, raw, default_status='moved')
 
         if action in ['card.field_update', 'card.update']:
-            logger.debug(f"MM card {source_card_id}: ignoring {action} — field updates do not sync to DYDX")
-            return {'status': 'ignored', 'reason': 'field_updates_disabled'}
+            raw = self.handle_assignee_change(source_card_id, 'change_request')
+            return self._format_action_result(action, raw, default_status='assignee_synced')
         
         return {'status': 'no_action'}
 
