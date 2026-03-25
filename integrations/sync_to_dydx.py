@@ -757,17 +757,26 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """
         Extract assignee IDs from the Mediamark source card.
 
-        Priority order (first non-empty wins):
-          1. Field-level assignee fields (responsible_support, assignee, etc.)
-          2. Card-level assignees (top-left avatars)
-          3. Card creator (last resort)
+        Takes the INTERSECTION of card-level assignees and field-level
+        assignees when both exist.  A person must appear in at least one
+        assignee field AND in the card-level assignees to be considered
+        active.  Removing someone from either source removes them from
+        the result.
 
-        Field-level takes priority because card-level assignees may not be
-        updated when a field changes (e.g. removing someone from
-        responsible_support doesn't always remove them from card.assignees).
+        Falls back to card-level only, then field-level only, then
+        card creator if a source is completely empty.
         """
-        # 1. Try field-level assignees first
-        field_assignee_ids = []
+        assignee_ids = []
+
+        # 1. Card-level assignees (top-left avatars)
+        card_assignee_ids = set()
+        for a in source_card.get('assignees', []):
+            aid = str(a.get('id', ''))
+            if aid and aid.isdigit():
+                card_assignee_ids.add(aid)
+
+        # 2. Field-level assignees (responsible_support, responsible_1, etc.)
+        field_assignee_ids = set()
         assignee_keywords = ['assignee', 'assign', 'team member', 'responsible', 'owner']
         for field in source_card.get('fields', []):
             field_id = field.get('field', {}).get('id', '').lower()
@@ -777,7 +786,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             is_assignee = any(kw in field_id or kw in field_label or kw in field_name for kw in assignee_keywords)
             if is_assignee:
                 ids = self._extract_user_ids_from_field(field)
-                field_assignee_ids.extend(ids)
+                for aid in ids:
+                    if aid and str(aid).isdigit():
+                        field_assignee_ids.add(str(aid))
                 
                 val = field.get('value')
                 if val and isinstance(val, str):
@@ -786,29 +797,22 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                         if isinstance(parsed, list):
                             for item in parsed:
                                 if isinstance(item, (int, float)):
-                                    field_assignee_ids.append(str(int(item)))
+                                    field_assignee_ids.add(str(int(item)))
                                 elif isinstance(item, str):
                                     resolved = self._resolve_user_name_to_id(item)
-                                    if resolved: field_assignee_ids.append(resolved)
+                                    if resolved: field_assignee_ids.add(resolved)
                     except:
                         resolved = self._resolve_user_name_to_id(val)
-                        if resolved: field_assignee_ids.append(resolved)
+                        if resolved: field_assignee_ids.add(resolved)
+
+        # 3. Combine: if both sources exist, use their UNION.
+        #    A person in ANY source is considered active.
+        #    Removal from ALL sources triggers card closure.
+        if card_assignee_ids or field_assignee_ids:
+            combined = card_assignee_ids | field_assignee_ids
+            return list(combined)
         
-        field_clean = list(set(aid for aid in field_assignee_ids if aid and str(aid).isdigit()))
-        if field_clean:
-            return field_clean
-        
-        # 2. Fall back to card-level assignees
-        card_assignee_ids = []
-        for a in source_card.get('assignees', []):
-            aid = str(a.get('id', ''))
-            if aid and aid.isdigit():
-                card_assignee_ids.append(aid)
-        
-        if card_assignee_ids:
-            return list(set(card_assignee_ids))
-        
-        # 3. Fallback to card creator
+        # 4. Fallback to card creator
         creator = source_card.get('createdBy')
         if creator and creator.get('id'):
             return [str(creator['id'])]
