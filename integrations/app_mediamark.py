@@ -1,7 +1,7 @@
 ﻿#!/usr/bin/env python3
 """
 Mediamark Webhook Server
-Real-time sync from Mediamark â†’ DYDX Development Tasks Management board.
+Real-time sync from Mediamark DYDX Development Tasks Management board.
 
 === WHAT THIS FILE DOES ===
 This is the Flask web server for the Mediamark integration. It:
@@ -394,12 +394,16 @@ def handle_pipefy_webhook():
 
         # For field updates, only process assignee-related changes.
         # Other field changes (deadlines, descriptions, etc.) don't need DYDX sync.
+        # Card-level assignee changes (top-left avatars) come as card.update
+        # WITHOUT a field object — let those through too.
         if is_field_update:
             field_info = data.get('data', {}).get('field', {}) or data.get('field', {})
             field_id = (field_info.get('id') or '').lower()
             field_label = (field_info.get('label') or '').lower()
+            has_field = bool(field_id or field_label)
             _assignee_kw = ('assignee', 'assign', 'responsible', 'owner', 'team member')
-            if not any(kw in field_id or kw in field_label for kw in _assignee_kw):
+            is_assignee_field = any(kw in field_id or kw in field_label for kw in _assignee_kw)
+            if has_field and not is_assignee_field:
                 logger.debug(f"MM card {card_id}: ignoring {action} for non-assignee field '{field_info.get('id', '')}'")
                 return jsonify({'status': 'ignored', 'reason': 'non_assignee_field_update'}), 200
 
