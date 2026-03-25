@@ -49,6 +49,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     # ---- Deduplication settings ----
     SYNC_DEDUP_WINDOW = 10 # seconds to prevent duplicate syncs from rapid consecutive webhooks 
     CREATION_COOLDOWN = 30 # seconds to prevent creating multiple DYDX cards for the same source card/assignee/phase combo
+    CARD_CACHE_TTL = 120 # seconds to cache find_all_active_dydx_cards results (avoids re-paginating 2400+ cards)
     FALLBACK_ASSIGNEE_EMAIL = 'co-creation.support@dydx.digital'
     
     def __init__(self):
@@ -112,6 +113,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         self._recently_created: Dict[str, float] = {}
         self._last_known_phase: Dict[str, Dict] = {}
         self._processing_cards: set = set()
+        self._card_lookup_cache: Dict[str, Dict] = {}
         
         logger.info(f"MediamarkSync initialized. Phases: {list(self.dydx_phases.keys())}")
     
@@ -198,6 +200,30 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """Mark card as done processing."""
         with self._lock_manager:
             self._processing_cards.discard(source_card_id)
+
+    # ============================================
+    # CARD LOOKUP CACHE — Avoids re-paginating the entire DYDX board
+    # ============================================
+
+    def _get_cached_dydx_cards(self, source_card_id: str) -> Optional[List[Dict]]:
+        """Return cached DYDX cards for a source card, or None if cache miss/expired."""
+        with self._lock_manager:
+            entry = self._card_lookup_cache.get(source_card_id)
+            if entry and (time.time() - entry['ts']) < self.CARD_CACHE_TTL:
+                return entry['cards']
+            if entry:
+                del self._card_lookup_cache[source_card_id]
+            return None
+
+    def _set_cached_dydx_cards(self, source_card_id: str, cards: List[Dict]):
+        """Cache the result of find_all_active_dydx_cards_by_source_id."""
+        with self._lock_manager:
+            self._card_lookup_cache[source_card_id] = {'cards': list(cards), 'ts': time.time()}
+
+    def _invalidate_card_cache(self, source_card_id: str):
+        """Remove cached DYDX cards for a source card (call after create/close)."""
+        with self._lock_manager:
+            self._card_lookup_cache.pop(source_card_id, None)
     
     # ============================================
     # PHASE MAPPING — Mediamark phases → DYDX phases
@@ -865,6 +891,11 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     
     def find_all_active_dydx_cards_by_source_id(self, source_card_id: str) -> List[Dict]:
         """Find ALL active DYDX cards linked to a Mediamark source card via main_task_id field."""
+        cached = self._get_cached_dydx_cards(source_card_id)
+        if cached is not None:
+            logger.debug(f"Cache hit: {len(cached)} active DYDX card(s) for MM card {source_card_id}")
+            return cached
+
         query = """query GetPipeCards($pipeId: ID!, $after: String) { 
             cards(pipe_id: $pipeId, first: 50, after: $after) { 
                 pageInfo { hasNextPage endCursor }
@@ -914,7 +945,8 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         except Exception as e:
             logger.error(f"Error finding active DYDX cards for MM card {source_card_id}: {e}")
             return []
-            
+
+        self._set_cached_dydx_cards(source_card_id, matching_cards)
         return matching_cards
 
     def find_dydx_card_for_assignee(self, source_card_id: str, assignee_id: str) -> Optional[Dict]:
@@ -1047,6 +1079,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         logger.info(f"Created DYDX card {new_card['id']} for MM card {source_card_id} (assignee={dydx_assignee_name}, phase={final_target_phase})")
         
         self._record_creation(source_card_id, assignee_id, final_target_phase)
+        self._invalidate_card_cache(source_card_id)
         
         # Card-level assignees are set atomically via assignee_ids in the
         # createCard mutation above. Do NOT call set_card_assignees here —
@@ -1071,17 +1104,20 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         return new_card
 
-    def close_dydx_card(self, dydx_card_id: str, source_card: Dict = None) -> bool:
+    def close_dydx_card(self, dydx_card_id: str, source_card: Dict = None, dydx_card_data: Dict = None) -> bool:
         """Close a DYDX card by moving it to the Done phase."""
-        card_data = None
-        try:
-            card = self.dydx_client.get_card(dydx_card_id)
-            card_data = card.get('data', {}).get('card', {})
+        card_data = dydx_card_data
+        if not card_data:
+            try:
+                card = self.dydx_client.get_card(dydx_card_id)
+                card_data = card.get('data', {}).get('card', {})
+            except Exception: pass
+
+        if card_data:
             current_phase_id = card_data.get('current_phase', {}).get('id')
             done_phase_id = self.dydx_phases.get('done')
             if current_phase_id and done_phase_id and current_phase_id == done_phase_id:
                 return True
-        except Exception: pass
 
         # Build lookup of current field values to avoid redundant writes
         current_fields = {}
@@ -1106,6 +1142,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             try:
                 self.dydx_client.move_card_to_phase(dydx_card_id, target_phase_id)
                 logger.info(f"Closed DYDX card {dydx_card_id}")
+                # Invalidate cache so subsequent find_all calls don't see this card
+                if source_card and source_card.get('id'):
+                    self._invalidate_card_cache(source_card['id'])
                 return True
             except Exception as e:
                 if "already in the destination phase" in str(e):
@@ -1402,7 +1441,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 dydx_card = dydx_cards_by_assignee[assignee_id]
                 if not dydx_card or not dydx_card.get('id'):
                     continue
-                self.close_dydx_card(dydx_card['id'], source_card)
+                self.close_dydx_card(dydx_card['id'], source_card, dydx_card_data=dydx_card)
                 result['closed'].append(dydx_card['id'])
         
             # Sync/move remaining cards
@@ -1579,7 +1618,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         closed_ids = []
         for card in all_cards:
-            self.close_dydx_card(card['id'], source_card)
+            self.close_dydx_card(card['id'], source_card, dydx_card_data=card)
             closed_ids.append(card['id'])
         
         return {'status': 'completed', 'closed_cards': closed_ids}
@@ -1775,7 +1814,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             if self._phase_matches(current_phase, self.CR_COMPLETED_PHASES):
                 all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
                 for dydx_card in all_cards:
-                    self.close_dydx_card(dydx_card['id'], source_card)
+                    self.close_dydx_card(dydx_card['id'], source_card, dydx_card_data=dydx_card)
                 return {'status': 'completed', 'cards_closed': len(all_cards)}
 
             # CLIENT APPROVAL (excluded)
@@ -1792,7 +1831,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     cards_with_wrong_status.append(card)
             
             for card in cards_with_wrong_status:
-                self.close_dydx_card(card['id'], source_card)
+                self.close_dydx_card(card['id'], source_card, dydx_card_data=card)
             
             result = self.sync_assignees_to_dydx(source_card_id, 'change_request', target_phase=target_dydx_phase, enable_move=True, is_move_event=True, source_card=source_card)
             result['closed_wrong_status'] = [c['id'] for c in cards_with_wrong_status]
