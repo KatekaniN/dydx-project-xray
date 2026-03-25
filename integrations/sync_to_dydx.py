@@ -114,6 +114,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         self._last_known_phase: Dict[str, Dict] = {}
         self._processing_cards: set = set()
         self._card_lookup_cache: Dict[str, Dict] = {}
+        self._card_field_assignees: Dict[str, Dict[str, set]] = {}  # card_id -> {field_id -> {assignee_ids}}
         
         logger.info(f"MediamarkSync initialized. Phases: {list(self.dydx_phases.keys())}")
     
@@ -255,6 +256,164 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 return
             entry['cards'] = [c for c in entry['cards'] if c.get('id') != dydx_card_id]
             entry['ts'] = time.time()  # refresh TTL
+
+    # ============================================
+    # ASSIGNEE CASCADE — Removal from any field triggers removal from all
+    # ============================================
+
+    def _get_per_field_assignees(self, source_card: Dict) -> Dict[str, set]:
+        """Return a per-field breakdown of assignee IDs on the MM card.
+
+        Returns a dict like::
+
+            {'_card_level': {'301017419', '307242749'},
+             'responsible_support': {'304594533'},
+             'responsible_1': {'301017419'},
+             'responsible_comms_to_client': {'307242749'}}
+        """
+        result: Dict[str, set] = {}
+
+        # Card-level assignees
+        card_ids: set = set()
+        for a in source_card.get('assignees', []):
+            aid = str(a.get('id', ''))
+            if aid and aid.isdigit():
+                card_ids.add(aid)
+        result['_card_level'] = card_ids
+
+        # Field-level assignees
+        assignee_keywords = ['assignee', 'assign', 'team member', 'responsible', 'owner']
+        for field in source_card.get('fields', []):
+            field_id = field.get('field', {}).get('id', '')
+            field_label = field.get('field', {}).get('label', '').lower()
+            field_name = field.get('name', '').lower()
+            field_id_lower = field_id.lower()
+
+            is_assignee = any(
+                kw in field_id_lower or kw in field_label or kw in field_name
+                for kw in assignee_keywords
+            )
+            if not is_assignee:
+                continue
+
+            ids: set = set()
+            for uid in self._extract_user_ids_from_field(field):
+                if uid and str(uid).isdigit():
+                    ids.add(str(uid))
+
+            val = field.get('value')
+            if val and isinstance(val, str):
+                try:
+                    parsed = json.loads(val)
+                    if isinstance(parsed, list):
+                        for item in parsed:
+                            if isinstance(item, (int, float)):
+                                ids.add(str(int(item)))
+                            elif isinstance(item, str):
+                                resolved = self._resolve_user_name_to_id(item)
+                                if resolved:
+                                    ids.add(resolved)
+                except Exception:
+                    resolved = self._resolve_user_name_to_id(val)
+                    if resolved:
+                        ids.add(resolved)
+
+            result[field_id] = ids
+
+        return result
+
+    def _detect_assignee_removals(self, source_card_id: str, current_breakdown: Dict[str, set]) -> set:
+        """Compare per-field assignees with stored state to detect removals.
+
+        Returns the set of Mediamark assignee IDs that were removed from
+        at least one field WITHOUT being added to another field.  These
+        IDs should be force-removed from all remaining fields and their
+        DYDX cards closed.
+
+        The stored per-field state is updated to *current_breakdown*.
+        """
+        prev_breakdown = self._card_field_assignees.get(source_card_id)
+        # Always store the latest breakdown
+        self._card_field_assignees[source_card_id] = {
+            k: set(v) for k, v in current_breakdown.items()
+        }
+
+        if not prev_breakdown:
+            # First time seeing this card — no removal to detect
+            return set()
+
+        all_removed: set = set()
+        all_added: set = set()
+
+        # Compare fields that existed before
+        for field_id, old_ids in prev_breakdown.items():
+            new_ids = current_breakdown.get(field_id, set())
+            all_removed |= (old_ids - new_ids)
+            all_added |= (new_ids - old_ids)
+
+        # Check fields that are new (didn't exist in previous breakdown)
+        for field_id, new_ids in current_breakdown.items():
+            if field_id not in prev_breakdown:
+                all_added |= new_ids
+
+        # Only cascade for people who were removed but NOT added elsewhere
+        force_remove = all_removed - all_added
+        if force_remove:
+            logger.info(
+                f"MM card {source_card_id}: cascade removal detected — "
+                f"removed_from_any={all_removed}, added_to_any={all_added}, "
+                f"force_remove={force_remove}"
+            )
+        return force_remove
+
+    def _remove_from_all_assignee_fields(
+        self, source_card_id: str, source_card: Dict,
+        remove_ids: set, current_breakdown: Dict[str, set]
+    ):
+        """Remove *remove_ids* from every assignee source on the MM card.
+
+        Updates both field-level and card-level assignees via the Pipefy API
+        so that the person is fully disassociated from the card.
+        """
+        for field_id, current_ids in current_breakdown.items():
+            overlap = current_ids & remove_ids
+            if not overlap:
+                continue
+
+            remaining = current_ids - remove_ids
+
+            if field_id == '_card_level':
+                try:
+                    self.mediamark_client.set_card_assignees(
+                        source_card_id, [str(x) for x in remaining]
+                    )
+                    logger.info(
+                        f"MM card {source_card_id}: removed {overlap} from card-level assignees"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"MM card {source_card_id}: failed to update card-level assignees: {e}"
+                    )
+            else:
+                try:
+                    new_value = [str(int(x)) for x in remaining] if remaining else []
+                    self.mediamark_client.update_card_field(
+                        source_card_id, field_id, new_value
+                    )
+                    logger.info(
+                        f"MM card {source_card_id}: removed {overlap} from field '{field_id}'"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"MM card {source_card_id}: failed to update field '{field_id}': {e}"
+                    )
+
+        # Update stored breakdown to reflect the cleanup
+        for field_id in current_breakdown:
+            current_breakdown[field_id] -= remove_ids
+        self._card_field_assignees[source_card_id] = {
+            k: set(v) for k, v in current_breakdown.items()
+        }
 
     # ============================================
     # PHASE MAPPING — Mediamark phases → DYDX phases
@@ -788,11 +947,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """
         Extract assignee IDs from the Mediamark source card.
 
-        Takes the INTERSECTION of card-level assignees and field-level
-        assignees when both exist.  A person must appear in at least one
-        assignee field AND in the card-level assignees to be considered
-        active.  Removing someone from either source removes them from
-        the result.
+        Returns the UNION of card-level and field-level assignees.
+        Removal cascading (remove from one field → remove from all) is
+        handled separately by ``_detect_assignee_removals``.
 
         Falls back to card-level only, then field-level only, then
         card creator if a source is completely empty.
@@ -1418,11 +1575,24 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             correct_dydx_phase = target_phase or self._get_correct_dydx_phase(source_phase)
             is_backlog = 'backlog' in correct_dydx_phase.lower()
             
+            # ----------------------------------------------------------
+            # Cascade removal: if someone was removed from ANY assignee
+            # field, remove them from ALL remaining fields and exclude
+            # from the current assignee set so their DYDX card is closed.
+            # ----------------------------------------------------------
+            current_breakdown = self._get_per_field_assignees(source_card)
+            force_remove_ids = self._detect_assignee_removals(source_card_id, current_breakdown)
+            if force_remove_ids:
+                self._remove_from_all_assignee_fields(
+                    source_card_id, source_card, force_remove_ids, current_breakdown
+                )
+
             # Source card assignee IDs belong to the Mediamark org.
             # For diffing against existing DYDX cards we must compare
             # using DYDX assignee IDs, otherwise moves look like
             # "removed + new" and cause close/recreate churn.
             source_assignee_ids = set(self._get_assignee_ids(source_card, field_values, is_backlog))
+            source_assignee_ids -= force_remove_ids  # Exclude cascade-removed people
             current_assignee_ids = set()
             for source_assignee_id in source_assignee_ids:
                 dydx_assignee_id, _ = self._resolve_dydx_assignee(source_card, source_assignee_id)
