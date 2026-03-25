@@ -239,6 +239,15 @@ class MediamarkCardChangeListener:
         if change.get('is_completion', False):
             # Card moved to Done — close all DYDX cards
             self.sync_service.handle_support_completed(card_id)
+        elif change.get('assignee_change'):
+            # Card-level assignee added/removed — Pipefy doesn't fire a webhook
+            # for this, so the listener is the only way to detect it.
+            ac = change['assignee_change']
+            logger.info(
+                f"Listener detected assignee change on MM card {card_id}: "
+                f"added={ac.get('added', [])}, removed={ac.get('removed', [])}"
+            )
+            self.sync_service.handle_assignee_change(card_id, 'support_ticket')
         else:
             # Field-level changes on the MM card are intentionally
             # NOT synced to DYDX.  Only card.create (via webhook)
