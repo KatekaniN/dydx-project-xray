@@ -130,24 +130,31 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             return self._sync_locks[source_card_id]
     
     def _should_skip_sync(self, source_card_id: str, target_phase: str = None) -> bool:
-        """Check if we just synced this card+phase combo (within dedup window).
+        """Check if we just synced this card (within dedup window).
         
-        Phase-aware: a sync for 'in progress' does NOT block a later sync
-        for 'testing / comms' on the same card.
+        Uses both a phase-specific key AND a card-level key so that
+        handle_assignee_change (target_phase=None) is blocked by a
+        recent card.move sync and vice-versa.
         """
         current_time = time.time()
-        key = f"{source_card_id}:{(target_phase or '').lower()}"
+        phase_key = f"{source_card_id}:{(target_phase or '').lower()}"
+        card_key = f"{source_card_id}:*"
         with self._lock_manager:
-            last_sync = self._sync_timestamps.get(key, 0)
-            if current_time - last_sync < self.SYNC_DEDUP_WINDOW:
+            last_phase = self._sync_timestamps.get(phase_key, 0)
+            last_card = self._sync_timestamps.get(card_key, 0)
+            if current_time - last_phase < self.SYNC_DEDUP_WINDOW:
+                return True
+            if current_time - last_card < self.SYNC_DEDUP_WINDOW:
                 return True
             return False
     
     def _record_sync(self, source_card_id: str, target_phase: str = None):
         """Record that we just synced this card+phase combo."""
-        key = f"{source_card_id}:{(target_phase or '').lower()}"
+        phase_key = f"{source_card_id}:{(target_phase or '').lower()}"
+        card_key = f"{source_card_id}:*"
         with self._lock_manager:
-            self._sync_timestamps[key] = time.time()
+            self._sync_timestamps[phase_key] = time.time()
+            self._sync_timestamps[card_key] = time.time()
     
     def _was_recently_created(self, source_card_id: str, assignee_id: str, dydx_phase: str) -> bool:
         """Check if a card was recently created for this source/assignee/phase combo."""
@@ -224,7 +231,31 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """Remove cached DYDX cards for a source card (call after create/close)."""
         with self._lock_manager:
             self._card_lookup_cache.pop(source_card_id, None)
-    
+
+    def _add_to_card_cache(self, source_card_id: str, new_card: Dict, assignee_id: str):
+        """Add a just-created DYDX card to the cache in-place.
+
+        This avoids a full board re-pagination which may return stale data
+        due to Pipefy's eventual consistency.
+        """
+        with self._lock_manager:
+            entry = self._card_lookup_cache.get(source_card_id)
+            if entry is None:
+                return  # no cache entry to update
+            card_copy = dict(new_card)
+            card_copy['_assignee_id'] = str(assignee_id)
+            entry['cards'].append(card_copy)
+            entry['ts'] = time.time()  # refresh TTL
+
+    def _remove_from_card_cache(self, source_card_id: str, dydx_card_id: str):
+        """Remove a closed DYDX card from the cache in-place."""
+        with self._lock_manager:
+            entry = self._card_lookup_cache.get(source_card_id)
+            if entry is None:
+                return
+            entry['cards'] = [c for c in entry['cards'] if c.get('id') != dydx_card_id]
+            entry['ts'] = time.time()  # refresh TTL
+
     # ============================================
     # PHASE MAPPING — Mediamark phases → DYDX phases
     # ============================================
@@ -1109,7 +1140,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         logger.info(f"Created DYDX card {new_card['id']} for MM card {source_card_id} (assignee={dydx_assignee_name}, phase={final_target_phase})")
         
         self._record_creation(source_card_id, assignee_id, final_target_phase)
-        self._invalidate_card_cache(source_card_id)
+        self._add_to_card_cache(source_card_id, new_card, dydx_assignee_id)
         
         # Card-level assignees are set atomically via assignee_ids in the
         # createCard mutation above. Do NOT call set_card_assignees here —
@@ -1172,9 +1203,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             try:
                 self.dydx_client.move_card_to_phase(dydx_card_id, target_phase_id)
                 logger.info(f"Closed DYDX card {dydx_card_id}")
-                # Invalidate cache so subsequent find_all calls don't see this card
+                # Remove from cache so subsequent find_all calls don't see this card
                 if source_card and source_card.get('id'):
-                    self._invalidate_card_cache(source_card['id'])
+                    self._remove_from_card_cache(source_card['id'], dydx_card_id)
                 return True
             except Exception as e:
                 if "already in the destination phase" in str(e):
