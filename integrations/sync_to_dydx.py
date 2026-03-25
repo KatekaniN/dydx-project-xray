@@ -978,8 +978,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         # Get due date
         date_val = self.get_source_due_date(source_card, field_values)
         
-        # Build the title with [{Type}] prefix
+        # Build the title with [{Type}] prefix and assignee name suffix
         title = self._build_card_title(source_card, field_values, board_type)
+        title = f"{title} - {dydx_assignee_name}"
         
         # Build project name
         project_name = self._build_project_name(source_card, field_values)
