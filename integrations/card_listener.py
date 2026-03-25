@@ -229,17 +229,26 @@ class MediamarkCardChangeListener:
         """Handle a detected change by calling the appropriate sync method."""
         card_id = change['card_id']
         
-        current_time = time.time()
-        with self._lock:
-            last_time = self._last_processed.get(card_id, 0)
-            if current_time - last_time < self._dedup_window:
-                return
-            self._last_processed[card_id] = current_time
+        # Assignee changes bypass the dedup window because:
+        # 1. Pipefy never fires webhooks for card-level assignee changes
+        # 2. The listener is the ONLY way to detect them
+        # 3. The sync engine has its own dedup (_should_skip_sync)
+        # Without this bypass, a recent webhook (e.g. card.move) would
+        # block the listener from processing a subsequent assignee add.
+        is_assignee_change = bool(change.get('assignee_change'))
+        
+        if not is_assignee_change:
+            current_time = time.time()
+            with self._lock:
+                last_time = self._last_processed.get(card_id, 0)
+                if current_time - last_time < self._dedup_window:
+                    return
+                self._last_processed[card_id] = current_time
         
         if change.get('is_completion', False):
             # Card moved to Done — close all DYDX cards
             self.sync_service.handle_support_completed(card_id)
-        elif change.get('assignee_change'):
+        elif is_assignee_change:
             # Card-level assignee added/removed — Pipefy doesn't fire a webhook
             # for this, so the listener is the only way to detect it.
             ac = change['assignee_change']
