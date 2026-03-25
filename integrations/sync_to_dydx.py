@@ -37,6 +37,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     SUPPORT_TESTING_PHASES = ['comms to client']
     SUPPORT_COMMS_PHASES = ['comms to client']
     SUPPORT_COMPLETED_PHASES = ['resolved']
+    SUPPORT_CANCELLED_PHASES = ['not approved']
     SUPPORT_IN_PROGRESS_PHASES = ['in progress', 'review', 'new']
     SUPPORT_BACKLOG_PHASES = ['backlog']
     SUPPORT_ON_HOLD_PHASES = ['change request on hold']
@@ -1854,6 +1855,54 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         return {'status': 'completed', 'closed_cards': closed_ids}
 
+    def handle_support_cancelled(self, source_card_id: str) -> Dict:
+        """Handle 'NOT APPROVED' phase: move all DYDX cards to Cancelled."""
+        all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
+        if not all_cards:
+            return {'status': 'no_cards_found'}
+
+        cancelled_phase_id = self.dydx_phases.get('cancelled')
+        if not cancelled_phase_id:
+            logger.warning(f"MM card {source_card_id}: DYDX 'cancelled' phase not found — falling back to close")
+            return self.handle_support_completed(source_card_id)
+
+        cancelled_ids = []
+        for card in all_cards:
+            dydx_card_id = card['id']
+            current_phase_id = card.get('current_phase', {}).get('id')
+            if current_phase_id == cancelled_phase_id:
+                cancelled_ids.append(dydx_card_id)
+                continue
+            try:
+                self.dydx_client.move_card_to_phase(dydx_card_id, cancelled_phase_id)
+                self._remove_from_card_cache(source_card_id, dydx_card_id)
+                cancelled_ids.append(dydx_card_id)
+                logger.info(f"MM card {source_card_id}: moved DYDX card {dydx_card_id} to Cancelled")
+            except Exception as e:
+                if "already in the destination phase" in str(e):
+                    cancelled_ids.append(dydx_card_id)
+                else:
+                    logger.error(f"MM card {source_card_id}: failed to cancel DYDX card {dydx_card_id}: {e}")
+
+        return {'status': 'cancelled', 'cancelled_cards': cancelled_ids}
+
+    def handle_support_terminal(self, source_card_id: str) -> Dict:
+        """Route a card that has left active phases to completed or cancelled.
+
+        Called by the card listener when a card disappears from the board
+        (i.e. moved to a terminal phase).  Fetches the card to check the
+        actual phase name so the correct DYDX destination is used.
+        """
+        try:
+            source_data = self.mediamark_client.get_card(source_card_id)
+            phase = source_data['data']['card'].get('current_phase', {}).get('name', '')
+            if self._phase_matches(phase, self.SUPPORT_CANCELLED_PHASES):
+                logger.info(f"MM card {source_card_id}: terminal phase '{phase}' → cancelling DYDX cards")
+                return self.handle_support_cancelled(source_card_id)
+        except Exception as e:
+            logger.warning(f"MM card {source_card_id}: could not fetch phase for terminal routing ({e}) — defaulting to completed")
+        return self.handle_support_completed(source_card_id)
+
     def handle_support_comms(self, source_card_id: str) -> Dict:
         result = self.sync_assignees_to_dydx(
             source_card_id, 'support_ticket', 
@@ -1943,10 +1992,18 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             raw = self.handle_assignee_change(source_card_id, 'support_ticket')
             return self._format_action_result(action, raw, default_status='assignee_synced')
         
+        if action == 'card.done':
+            phase = current_phase or ''
+            if self._phase_matches(phase, self.SUPPORT_CANCELLED_PHASES):
+                return self.handle_support_cancelled(source_card_id)
+            return self.handle_support_completed(source_card_id)
+
         if action == 'card.move':
             phase = current_phase or ''
             if self._phase_matches(phase, self.SUPPORT_COMPLETED_PHASES): 
                 return self.handle_support_completed(source_card_id)
+            if self._phase_matches(phase, self.SUPPORT_CANCELLED_PHASES):
+                return self.handle_support_cancelled(source_card_id)
             if self._phase_matches(phase, self.SUPPORT_COMMS_PHASES):
                 raw = self.handle_support_comms(source_card_id)
                 return self._format_action_result(action, raw, default_status='comms_updated')
