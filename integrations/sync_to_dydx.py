@@ -719,7 +719,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         array_val = field.get('array_value')
         if array_val and isinstance(array_val, list):
             for item in array_val:
-                if isinstance(item, str):
+                if isinstance(item, (int, float)):
+                    user_ids.append(str(int(item)))
+                elif isinstance(item, str):
                     resolved = self._resolve_user_name_to_id(item)
                     if resolved: user_ids.append(resolved)
                 elif isinstance(item, dict):
@@ -735,7 +737,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     parsed = json.loads(value)
                     if isinstance(parsed, list):
                         for item in parsed:
-                            if isinstance(item, str):
+                            if isinstance(item, (int, float)):
+                                user_ids.append(str(int(item)))
+                            elif isinstance(item, str):
                                 resolved = self._resolve_user_name_to_id(item)
                                 if resolved: user_ids.append(resolved)
                             elif isinstance(item, dict):
@@ -752,18 +756,18 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     def _get_assignee_ids(self, source_card: Dict, field_values: Dict, is_backlog: bool = False) -> List[str]:
         """
         Extract assignee IDs from the Mediamark source card.
-        Checks card assignees, then field-level assignees.
+
+        Priority order (first non-empty wins):
+          1. Field-level assignee fields (responsible_support, assignee, etc.)
+          2. Card-level assignees (top-left avatars)
+          3. Card creator (last resort)
+
+        Field-level takes priority because card-level assignees may not be
+        updated when a field changes (e.g. removing someone from
+        responsible_support doesn't always remove them from card.assignees).
         """
-        assignee_ids = []
-        
-        # 1. Get from card-level assignees
-        card_assignees = source_card.get('assignees', [])
-        for a in card_assignees:
-            aid = str(a.get('id', ''))
-            if aid and aid.isdigit():
-                assignee_ids.append(aid)
-        
-        # 2. Get from assignee fields
+        # 1. Try field-level assignees first
+        field_assignee_ids = []
         assignee_keywords = ['assignee', 'assign', 'team member', 'responsible', 'owner']
         for field in source_card.get('fields', []):
             field_id = field.get('field', {}).get('id', '').lower()
@@ -773,7 +777,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             is_assignee = any(kw in field_id or kw in field_label or kw in field_name for kw in assignee_keywords)
             if is_assignee:
                 ids = self._extract_user_ids_from_field(field)
-                assignee_ids.extend(ids)
+                field_assignee_ids.extend(ids)
                 
                 val = field.get('value')
                 if val and isinstance(val, str):
@@ -781,22 +785,35 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                         parsed = json.loads(val)
                         if isinstance(parsed, list):
                             for item in parsed:
-                                if isinstance(item, str):
+                                if isinstance(item, (int, float)):
+                                    field_assignee_ids.append(str(int(item)))
+                                elif isinstance(item, str):
                                     resolved = self._resolve_user_name_to_id(item)
-                                    if resolved: assignee_ids.append(resolved)
+                                    if resolved: field_assignee_ids.append(resolved)
                     except:
                         resolved = self._resolve_user_name_to_id(val)
-                        if resolved: assignee_ids.append(resolved)
+                        if resolved: field_assignee_ids.append(resolved)
         
-        clean_ids = list(set(aid for aid in assignee_ids if aid and str(aid).isdigit()))
+        field_clean = list(set(aid for aid in field_assignee_ids if aid and str(aid).isdigit()))
+        if field_clean:
+            return field_clean
         
-        # Fallback to card creator if no assignees found
-        if not clean_ids:
-            creator = source_card.get('createdBy')
-            if creator and creator.get('id'):
-                clean_ids.append(str(creator['id']))
-                
-        return list(set(clean_ids))
+        # 2. Fall back to card-level assignees
+        card_assignee_ids = []
+        for a in source_card.get('assignees', []):
+            aid = str(a.get('id', ''))
+            if aid and aid.isdigit():
+                card_assignee_ids.append(aid)
+        
+        if card_assignee_ids:
+            return list(set(card_assignee_ids))
+        
+        # 3. Fallback to card creator
+        creator = source_card.get('createdBy')
+        if creator and creator.get('id'):
+            return [str(creator['id'])]
+        
+        return []
 
     def _get_user_name_by_id(self, user_id: str) -> str:
         """Return a display label for a Pipefy user ID.
@@ -828,6 +845,15 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             email = (assignee.get('email') or '').strip().lower()
             if email:
                 emails_to_try.append(email)
+
+        # Check card creator — covers the case where the source_assignee_id
+        # is the creator and card-level assignees are empty.
+        if not matched_source_assignee:
+            creator = source_card.get('createdBy', {})
+            if str(creator.get('id', '')) == source_assignee_id:
+                email = (creator.get('email') or '').strip().lower()
+                if email:
+                    emails_to_try.append(email)
 
         # Fallback source for assignee email: Work Email / Email fields on the card.
         # Only use this when no explicit source assignee object was matched.
