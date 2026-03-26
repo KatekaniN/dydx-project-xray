@@ -123,9 +123,15 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     # THREAD SAFETY — Locks and deduplication
     # ============================================
     # Prevents duplicate card creation from concurrent webhooks
+
+    @staticmethod
+    def _normalize_card_id(source_card_id: Any) -> str:
+        """Normalize card IDs before using them as in-memory state keys."""
+        return str(source_card_id).strip()
     
     def _get_sync_lock(self, source_card_id: str) -> threading.Lock:
         """Get or create a thread lock for a specific source card."""
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             if source_card_id not in self._sync_locks:
                 self._sync_locks[source_card_id] = threading.Lock()
@@ -149,6 +155,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         set the timestamp — yet the new call may carry genuinely new
         data (e.g. field removal after field addition).
         """
+        source_card_id = self._normalize_card_id(source_card_id)
         if skip_dedup:
             return False
         current_time = time.time()
@@ -165,6 +172,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     
     def _record_sync(self, source_card_id: str, target_phase: str = None):
         """Record that we just synced this card+phase combo."""
+        source_card_id = self._normalize_card_id(source_card_id)
         phase_key = f"{source_card_id}:{(target_phase or '').lower()}"
         card_key = f"{source_card_id}:*"
         with self._lock_manager:
@@ -173,6 +181,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     
     def _was_recently_created(self, source_card_id: str, assignee_id: str, dydx_phase: str) -> bool:
         """Check if a card was recently created for this source/assignee/phase combo."""
+        source_card_id = self._normalize_card_id(source_card_id)
         key = f"{source_card_id}:{assignee_id}:{dydx_phase.lower()}"
         with self._lock_manager:
             last_created = self._recently_created.get(key, 0)
@@ -182,6 +191,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     
     def _record_creation(self, source_card_id: str, assignee_id: str, dydx_phase: str):
         """Record that we just created a card for this combo."""
+        source_card_id = self._normalize_card_id(source_card_id)
         key = f"{source_card_id}:{assignee_id}:{dydx_phase.lower()}"
         with self._lock_manager:
             self._recently_created[key] = time.time()
@@ -190,6 +200,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     
     def _has_phase_changed(self, source_card_id: str, current_phase_name: str, current_phase_id: str) -> bool:
         """Check if the source card's phase has ACTUALLY changed since last check."""
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             last = self._last_known_phase.get(source_card_id)
             if not last:
@@ -212,6 +223,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     
     def _start_processing(self, source_card_id: str) -> bool:
         """Mark a card as currently being processed (prevents re-entry)."""
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             if source_card_id in self._processing_cards:
                 return False
@@ -220,6 +232,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     
     def _end_processing(self, source_card_id: str):
         """Mark card as done processing."""
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             self._processing_cards.discard(source_card_id)
 
@@ -233,6 +246,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         Returns a shallow copy of the list (and each card dict) so that
         callers cannot accidentally mutate the cached state.
         """
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             entry = self._card_lookup_cache.get(source_card_id)
             if entry and (time.time() - entry['ts']) < self.CARD_CACHE_TTL:
@@ -243,11 +257,13 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
 
     def _set_cached_dydx_cards(self, source_card_id: str, cards: List[Dict]):
         """Cache the result of find_all_active_dydx_cards_by_source_id."""
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             self._card_lookup_cache[source_card_id] = {'cards': list(cards), 'ts': time.time()}
 
     def _invalidate_card_cache(self, source_card_id: str):
         """Remove cached DYDX cards for a source card (call after create/close)."""
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             self._card_lookup_cache.pop(source_card_id, None)
 
@@ -257,6 +273,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         This avoids a full board re-pagination which may return stale data
         due to Pipefy's eventual consistency.
         """
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             entry = self._card_lookup_cache.get(source_card_id)
             if entry is None:
@@ -268,6 +285,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
 
     def _remove_from_card_cache(self, source_card_id: str, dydx_card_id: str):
         """Remove a closed DYDX card from the cache in-place."""
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             entry = self._card_lookup_cache.get(source_card_id)
             if entry is None:
@@ -277,6 +295,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
 
     def _update_card_phase_in_cache(self, source_card_id: str, dydx_card_id: str, phase_name: str, phase_id: str):
         """Update a cached DYDX card's phase after a successful move."""
+        source_card_id = self._normalize_card_id(source_card_id)
         with self._lock_manager:
             entry = self._card_lookup_cache.get(source_card_id)
             if entry is None:
@@ -362,6 +381,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
 
         The stored per-field state is updated to *current_breakdown*.
         """
+        source_card_id = self._normalize_card_id(source_card_id)
         prev_breakdown = self._card_field_assignees.get(source_card_id)
         # Always store the latest breakdown
         self._card_field_assignees[source_card_id] = {
@@ -405,6 +425,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         Updates both field-level and card-level assignees via the Pipefy API
         so that the person is fully disassociated from the card.
         """
+        source_card_id = self._normalize_card_id(source_card_id)
         for field_id, current_ids in current_breakdown.items():
             overlap = current_ids & remove_ids
             if not overlap:
@@ -1139,6 +1160,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     
     def find_all_active_dydx_cards_by_source_id(self, source_card_id: str) -> List[Dict]:
         """Find ALL active DYDX cards linked to a Mediamark source card via main_task_id field."""
+        source_card_id = self._normalize_card_id(source_card_id)
         cached = self._get_cached_dydx_cards(source_card_id)
         if cached is not None:
             logger.debug(f"Cache hit: {len(cached)} active DYDX card(s) for MM card {source_card_id}")
@@ -1203,6 +1225,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
 
     def find_dydx_card_for_assignee(self, source_card_id: str, assignee_id: str) -> Optional[Dict]:
         """Find the DYDX card for a specific source card + assignee combo."""
+        source_card_id = self._normalize_card_id(source_card_id)
         all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
         for card in all_cards:
             card_assignee_id = card.get('_assignee_id')
@@ -1583,6 +1606,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         Core method for per-assignee sync (Mediamark → DYDX).
         Creates/closes/moves DYDX cards based on source card assignees.
         """
+        source_card_id = self._normalize_card_id(source_card_id)
         sync_lock = self._get_sync_lock(source_card_id)
         
         # For move events and assignee changes, wait for any in-flight sync.
