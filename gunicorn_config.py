@@ -8,6 +8,7 @@ bind = f"0.0.0.0:{port}"
 # Formula: (2 * CPU cores) + 1
 workers = 3
 
+# Worker class — sync is fine for our webhook volume
 worker_class = "sync"
 
 # Timeout (seconds) — long enough for Pipefy API calls
