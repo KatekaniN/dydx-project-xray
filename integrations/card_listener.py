@@ -246,9 +246,8 @@ class MediamarkCardChangeListener:
                 self._last_processed[card_id] = current_time
         
         if change.get('is_completion', False):
-            # Card left active phases — fetch its current phase to decide
-            # Done (resolved) vs Cancelled (not approved).
-            self.sync_service.handle_support_terminal(card_id)
+            # Card moved to Done — close all DYDX cards
+            self.sync_service.handle_support_completed(card_id)
         elif is_assignee_change:
             # Card-level assignee added/removed — Pipefy doesn't fire a webhook
             # for this, so the listener is the only way to detect it.
