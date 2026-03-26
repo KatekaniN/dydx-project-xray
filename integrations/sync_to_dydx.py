@@ -130,7 +130,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 self._sync_locks[source_card_id] = threading.Lock()
             return self._sync_locks[source_card_id]
     
-    def _should_skip_sync(self, source_card_id: str, target_phase: str = None, is_move_event: bool = False) -> bool:
+    def _should_skip_sync(self, source_card_id: str, target_phase: str = None, is_move_event: bool = False, skip_dedup: bool = False) -> bool:
         """Check if we just synced this card (within dedup window).
         
         Uses both a phase-specific key AND a card-level key so that
@@ -141,7 +141,15 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         because they carry enable_move=True which a preceding
         handle_assignee_change (enable_move=False) does not.  The move
         MUST run to relocate cards between phases.
+
+        Blocking-lock callers (skip_dedup=True) bypass dedup entirely
+        because they already serialized behind the per-card lock.  By
+        the time they check dedup, the previous sync just finished and
+        set the timestamp — yet the new call may carry genuinely new
+        data (e.g. field removal after field addition).
         """
+        if skip_dedup:
+            return False
         current_time = time.time()
         phase_key = f"{source_card_id}:{(target_phase or '').lower()}"
         card_key = f"{source_card_id}:*"
@@ -1582,7 +1590,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             return {'status': 'skipped_locked', 'created': [], 'closed': [], 'synced': []}
         
         try:
-            if self._should_skip_sync(source_card_id, target_phase, is_move_event=is_move_event):
+            if self._should_skip_sync(source_card_id, target_phase, is_move_event=is_move_event, skip_dedup=blocking_lock):
                 logger.debug(f"MM card {source_card_id}: skipping dedup for phase '{target_phase}'")
                 return {'status': 'skipped_dedup', 'created': [], 'closed': [], 'synced': []}
             
