@@ -258,7 +258,11 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         with self._lock_manager:
             entry = self._card_lookup_cache.get(source_card_id)
             if entry is None:
-                return  # no cache entry to update
+                # Initial board scan may have failed before setting the cache entry.
+                # Create a fresh one so _was_recently_created / find_dydx_card_for_assignee
+                # can locate this card on the next lookup without a board scan.
+                entry = {'cards': [], 'ts': time.time()}
+                self._card_lookup_cache[source_card_id] = entry
             card_copy = dict(new_card)
             card_copy['_assignee_id'] = str(assignee_id)
             entry['cards'].append(card_copy)
@@ -1242,6 +1246,16 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                         f"— created within cooldown, returning existing DYDX card {existing['id']}"
                     )
                     return existing
+                # Card was created very recently but the board scan can't find it yet
+                # (Pipefy eventual consistency — new cards may not appear in a paginated
+                # scan for several seconds).  Trust the cooldown record over the stale
+                # board scan and skip creation to prevent a duplicate.
+                logger.warning(
+                    f"MM card {source_card_id}: creation cooldown active for assignee {assignee_id} "
+                    f"but card not found in board scan (Pipefy eventual consistency?) — "
+                    f"skipping creation to prevent duplicate"
+                )
+                return None
 
             # Always query the DYDX board for an existing card — even when called
             # from sync_assignees_to_dydx which already diffed the cache.  A
