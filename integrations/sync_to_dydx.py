@@ -40,6 +40,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     SUPPORT_IN_PROGRESS_PHASES = ['in progress', 'review', 'new']
     SUPPORT_BACKLOG_PHASES = ['backlog']
     SUPPORT_ON_HOLD_PHASES = ['change request on hold']
+    SUPPORT_CANCELLED_PHASES = ['not approved']
     
     # --- CHANGE REQUEST (CR) phase groups ---
     CR_EXCLUDED_PHASES = ['client approval']
@@ -1913,6 +1914,33 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         
         return {'status': 'completed', 'closed_cards': closed_ids}
 
+    def handle_support_cancelled(self, source_card_id: str) -> Dict:
+        """Handle 'Not approved' phase: move all DYDX cards to Cancelled."""
+        all_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
+        if not all_cards:
+            return {'status': 'no_cards_found'}
+
+        cancelled_ids = []
+        target_phase_id = self.dydx_phases.get('cancelled')
+        for dydx_card in all_cards:
+            card_id = dydx_card.get('id')
+            if not card_id or not target_phase_id:
+                continue
+            try:
+                self.dydx_client.move_card_to_phase(card_id, target_phase_id)
+                logger.info(f"DYDX card {card_id}: moved to Cancelled (MM card {source_card_id})")
+                cancelled_ids.append(card_id)
+            except Exception as e:
+                if 'already in the destination phase' not in str(e).lower():
+                    logger.error(f"Failed to move DYDX card {card_id} to Cancelled: {e}")
+                else:
+                    cancelled_ids.append(card_id)
+
+        if cancelled_ids:
+            self._invalidate_card_cache(source_card_id)
+
+        return {'status': 'cancelled', 'cancelled_cards': cancelled_ids}
+
     def handle_support_comms(self, source_card_id: str) -> Dict:
         result = self.sync_assignees_to_dydx(
             source_card_id, 'support_ticket', 
@@ -2006,6 +2034,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             phase = current_phase or ''
             if self._phase_matches(phase, self.SUPPORT_COMPLETED_PHASES): 
                 return self.handle_support_completed(source_card_id)
+            if self._phase_matches(phase, self.SUPPORT_CANCELLED_PHASES):
+                raw = self.handle_support_cancelled(source_card_id)
+                return self._format_action_result(action, raw, default_status='cancelled')
             if self._phase_matches(phase, self.SUPPORT_COMMS_PHASES):
                 raw = self.handle_support_comms(source_card_id)
                 return self._format_action_result(action, raw, default_status='comms_updated')
