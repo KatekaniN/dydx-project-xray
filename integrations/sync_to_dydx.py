@@ -130,12 +130,17 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 self._sync_locks[source_card_id] = threading.Lock()
             return self._sync_locks[source_card_id]
     
-    def _should_skip_sync(self, source_card_id: str, target_phase: str = None) -> bool:
+    def _should_skip_sync(self, source_card_id: str, target_phase: str = None, is_move_event: bool = False) -> bool:
         """Check if we just synced this card (within dedup window).
         
         Uses both a phase-specific key AND a card-level key so that
         handle_assignee_change (target_phase=None) is blocked by a
         recent card.move sync and vice-versa.
+
+        Move events (is_move_event=True) skip the card-level key check
+        because they carry enable_move=True which a preceding
+        handle_assignee_change (enable_move=False) does not.  The move
+        MUST run to relocate cards between phases.
         """
         current_time = time.time()
         phase_key = f"{source_card_id}:{(target_phase or '').lower()}"
@@ -145,7 +150,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             last_card = self._sync_timestamps.get(card_key, 0)
             if current_time - last_phase < self.SYNC_DEDUP_WINDOW:
                 return True
-            if current_time - last_card < self.SYNC_DEDUP_WINDOW:
+            if not is_move_event and current_time - last_card < self.SYNC_DEDUP_WINDOW:
                 return True
             return False
     
@@ -1161,7 +1166,11 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 cursor = page_info.get('endCursor')
                 
         except Exception as e:
-            logger.error(f"Error finding active DYDX cards for MM card {source_card_id}: {e}")
+            logger.error(f"Error finding active DYDX cards for MM card {source_card_id}: {e} (found {len(matching_cards)} card(s) before error)")
+            if matching_cards:
+                # Return partial results rather than losing already-found cards
+                self._set_cached_dydx_cards(source_card_id, matching_cards)
+                return matching_cards
             return []
 
         self._set_cached_dydx_cards(source_card_id, matching_cards)
@@ -1561,7 +1570,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             return {'status': 'skipped_locked', 'created': [], 'closed': [], 'synced': []}
         
         try:
-            if self._should_skip_sync(source_card_id, target_phase):
+            if self._should_skip_sync(source_card_id, target_phase, is_move_event=is_move_event):
                 logger.debug(f"MM card {source_card_id}: skipping dedup for phase '{target_phase}'")
                 return {'status': 'skipped_dedup', 'created': [], 'closed': [], 'synced': []}
             
@@ -1600,6 +1609,16 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                     current_assignee_ids.add(str(dydx_assignee_id))
             
             existing_dydx_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
+
+            # Safety net: for move/assignee events we expect existing cards.
+            # If the cache returned empty, retry once without cache to guard
+            # against stale cache or Pipefy eventual-consistency issues.
+            if not existing_dydx_cards and (is_move_event or blocking_lock):
+                self._invalidate_card_cache(source_card_id)
+                existing_dydx_cards = self.find_all_active_dydx_cards_by_source_id(source_card_id)
+                if existing_dydx_cards:
+                    logger.info(f"MM card {source_card_id}: cache-bypass retry found {len(existing_dydx_cards)} DYDX card(s)")
+
             dydx_cards_by_assignee: Dict[str, Dict] = {}
             cards_without_assignee = []
             
@@ -1698,11 +1717,18 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                                 result['moved'].append(dydx_card_id)
                             except Exception as e:
                                 logger.error(f"Move failed for DYDX card {dydx_card_id} (MM card {source_card_id}): {e}")
-                                self.close_dydx_card(dydx_card_id, source_card)
-                                new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase)
-                                result['closed'].append(dydx_card_id)
-                                if new_card and new_card.get('id'):
-                                    result['created'].append(new_card['id'])
+                                # Only close+recreate if the close actually succeeds.
+                                # Otherwise the old card stays in its current phase
+                                # and we'd create a duplicate.
+                                closed_ok = self.close_dydx_card(dydx_card_id, source_card)
+                                if closed_ok:
+                                    result['closed'].append(dydx_card_id)
+                                    new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase)
+                                    if new_card and new_card.get('id'):
+                                        result['created'].append(new_card['id'])
+                                else:
+                                    logger.warning(f"DYDX card {dydx_card_id}: move AND close both failed — leaving card in '{dydx_phase}' to avoid duplicates")
+                                    result['synced'].append(dydx_card_id)
                     # Phase doesn't match but move not enabled — just record as synced
                     else:
                         result['synced'].append(dydx_card_id)
