@@ -262,6 +262,18 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             entry['cards'] = [c for c in entry['cards'] if c.get('id') != dydx_card_id]
             entry['ts'] = time.time()  # refresh TTL
 
+    def _update_card_phase_in_cache(self, source_card_id: str, dydx_card_id: str, phase_name: str, phase_id: str):
+        """Update a cached DYDX card's phase after a successful move."""
+        with self._lock_manager:
+            entry = self._card_lookup_cache.get(source_card_id)
+            if entry is None:
+                return
+            for card in entry['cards']:
+                if card.get('id') == dydx_card_id:
+                    card['current_phase'] = {'id': phase_id, 'name': phase_name}
+                    break
+            entry['ts'] = time.time()
+
     # ============================================
     # ASSIGNEE CASCADE — Removal from any field triggers removal from all
     # ============================================
@@ -1716,19 +1728,32 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                                 logger.info(f"Moved DYDX card {dydx_card_id}: '{dydx_phase}' → '{correct_dydx_phase}' (MM card {source_card_id})")
                                 result['moved'].append(dydx_card_id)
                             except Exception as e:
-                                logger.error(f"Move failed for DYDX card {dydx_card_id} (MM card {source_card_id}): {e}")
-                                # Only close+recreate if the close actually succeeds.
-                                # Otherwise the old card stays in its current phase
-                                # and we'd create a duplicate.
-                                closed_ok = self.close_dydx_card(dydx_card_id, source_card)
-                                if closed_ok:
-                                    result['closed'].append(dydx_card_id)
-                                    new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase)
-                                    if new_card and new_card.get('id'):
-                                        result['created'].append(new_card['id'])
+                                if "already in the destination phase" in str(e).lower():
+                                    # Card is already where we want it (stale cache).
+                                    # Treat as success — do NOT close+recreate.
+                                    logger.info(f"DYDX card {dydx_card_id}: already in '{correct_dydx_phase}' (MM card {source_card_id})")
+                                    result['moved'].append(dydx_card_id)
                                 else:
-                                    logger.warning(f"DYDX card {dydx_card_id}: move AND close both failed — leaving card in '{dydx_phase}' to avoid duplicates")
-                                    result['synced'].append(dydx_card_id)
+                                    logger.error(f"Move failed for DYDX card {dydx_card_id} (MM card {source_card_id}): {e}")
+                                    # Only close+recreate if the close actually succeeds.
+                                    # Otherwise the old card stays in its current phase
+                                    # and we'd create a duplicate.
+                                    closed_ok = self.close_dydx_card(dydx_card_id, source_card)
+                                    if closed_ok:
+                                        result['closed'].append(dydx_card_id)
+                                        new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase)
+                                        if new_card and new_card.get('id'):
+                                            result['created'].append(new_card['id'])
+                                    else:
+                                        logger.warning(f"DYDX card {dydx_card_id}: move AND close both failed — leaving card in '{dydx_phase}' to avoid duplicates")
+                                        result['synced'].append(dydx_card_id)
+                            # Update the cached phase so subsequent syncs
+                            # see the correct phase and don't retry the move.
+                            if target_phase_id:
+                                self._update_card_phase_in_cache(
+                                    source_card_id, dydx_card_id,
+                                    correct_dydx_phase, target_phase_id
+                                )
                     # Phase doesn't match but move not enabled — just record as synced
                     else:
                         result['synced'].append(dydx_card_id)
