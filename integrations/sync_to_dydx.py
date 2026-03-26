@@ -49,7 +49,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     
     # ---- Deduplication settings ----
     SYNC_DEDUP_WINDOW = 10 # seconds to prevent duplicate syncs from rapid consecutive webhooks 
-    CREATION_COOLDOWN = 30 # seconds to prevent creating multiple DYDX cards for the same source card/assignee/phase combo
+    CREATION_COOLDOWN = 120 # seconds to prevent creating multiple DYDX cards for the same source card/assignee/phase combo
     CARD_CACHE_TTL = 120 # seconds to cache find_all_active_dydx_cards results (avoids re-paginating 2400+ cards)
     FALLBACK_ASSIGNEE_EMAIL = 'co-creation.support@dydx.digital'
     
@@ -228,11 +228,15 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     # ============================================
 
     def _get_cached_dydx_cards(self, source_card_id: str) -> Optional[List[Dict]]:
-        """Return cached DYDX cards for a source card, or None if cache miss/expired."""
+        """Return cached DYDX cards for a source card, or None if cache miss/expired.
+
+        Returns a shallow copy of the list (and each card dict) so that
+        callers cannot accidentally mutate the cached state.
+        """
         with self._lock_manager:
             entry = self._card_lookup_cache.get(source_card_id)
             if entry and (time.time() - entry['ts']) < self.CARD_CACHE_TTL:
-                return entry['cards']
+                return [dict(c) for c in entry['cards']]
             if entry:
                 del self._card_lookup_cache[source_card_id]
             return None
@@ -1239,11 +1243,12 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         if not skip_duplicate_check:
             existing_card = self.find_dydx_card_for_assignee(source_card_id, assignee_id)
             if existing_card:
-                raise ValueError(
-                    f"DYDX card already exists for source card {source_card_id} "
-                    f"(assignee {assignee_id}) → existing DYDX card {existing_card['id']}. "
-                    f"No new card created."
+                logger.info(
+                    f"MM card {source_card_id}: DYDX card already exists for "
+                    f"assignee {assignee_id} → existing DYDX card {existing_card['id']}. "
+                    f"Skipping creation."
                 )
+                return existing_card
         
         dydx_assignee_id, dydx_assignee_name = self._resolve_dydx_assignee(source_card, assignee_id)
         if not dydx_assignee_id:
@@ -1699,9 +1704,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 f"remaining={current_assignee_ids & existing_assignee_ids}"
             )
         
-            # Create cards for new assignees (skip redundant duplicate scan — already checked above)
+            # Create cards for new assignees
             for assignee_id in new_assignees:
-                new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase, skip_duplicate_check=True)
+                new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase, skip_duplicate_check=False)
                 if new_card and new_card.get('id'):
                     result['created'].append(new_card['id'])
                 else:
