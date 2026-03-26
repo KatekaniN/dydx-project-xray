@@ -116,6 +116,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         self._processing_cards: set = set()
         self._card_lookup_cache: Dict[str, Dict] = {}
         self._card_field_assignees: Dict[str, Dict[str, set]] = {}  # card_id -> {field_id -> {assignee_ids}}
+        self._creation_locks: Dict[str, threading.Lock] = {}  # (source_card_id:assignee_id) -> Lock
         
         logger.info(f"MediamarkSync initialized. Phases: {list(self.dydx_phases.keys())}")
     
@@ -130,7 +131,21 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             if source_card_id not in self._sync_locks:
                 self._sync_locks[source_card_id] = threading.Lock()
             return self._sync_locks[source_card_id]
-    
+
+    def _get_creation_lock(self, source_card_id: str, assignee_id: str) -> threading.Lock:
+        """Get or create a per-assignee creation lock.
+
+        Ensures that concurrent threads trying to create a DYDX card for
+        the same (source_card_id, assignee_id) pair are serialised.  The
+        second thread will find the card the first thread already created
+        and return it instead of creating a duplicate.
+        """
+        key = f"{source_card_id}:{assignee_id}"
+        with self._lock_manager:
+            if key not in self._creation_locks:
+                self._creation_locks[key] = threading.Lock()
+            return self._creation_locks[key]
+
     def _should_skip_sync(self, source_card_id: str, target_phase: str = None) -> bool:
         """Check if we just synced this card (within dedup window).
         
@@ -243,7 +258,11 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         with self._lock_manager:
             entry = self._card_lookup_cache.get(source_card_id)
             if entry is None:
-                return  # no cache entry to update
+                # Initial board scan may have failed before setting the cache entry.
+                # Create a fresh one so _was_recently_created / find_dydx_card_for_assignee
+                # can locate this card on the next lookup without a board scan.
+                entry = {'cards': [], 'ts': time.time()}
+                self._card_lookup_cache[source_card_id] = entry
             card_copy = dict(new_card)
             card_copy['_assignee_id'] = str(assignee_id)
             entry['cards'].append(card_copy)
@@ -1181,10 +1200,15 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
     # CREATE & CLOSE DYDX CARDS
     # ============================================
     
-    def create_dydx_card_for_assignee(self, source_card: Dict, board_type: str, assignee_id: str, target_phase: str = None, skip_duplicate_check: bool = False) -> Optional[Dict]:
+    def create_dydx_card_for_assignee(self, source_card: Dict, board_type: str, assignee_id: str, target_phase: str = None) -> Optional[Dict]:
         """
         Create a DYDX Development Tasks card for one assignee.
-        
+
+        Thread-safe: acquires a per-(source_card, assignee) lock before
+        checking for an existing card.  Any concurrent thread that races
+        to create the same card will block on the lock, then find the
+        already-created card and return it without creating a duplicate.
+
         MEDIAMARK-SPECIFIC:
         - Title: [{Type of request}] Card Title
         - Client Name: "Mediamark" (hardcoded)
@@ -1193,135 +1217,165 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         """
         source_card_id = source_card['id']
         field_values = self.extract_field_values(source_card)
-        
+
         final_target_phase = target_phase
         current_phase_obj = source_card.get('current_phase', {})
         current_phase_name = current_phase_obj.get('name', '')
         current_phase_id = current_phase_obj.get('id', '')
-        
+
         if not final_target_phase:
             final_target_phase = self._get_correct_dydx_phase(current_phase_name)
-        
-        # DUPLICATE CHECK
-        if self._was_recently_created(source_card_id, assignee_id, final_target_phase):
-            existing = self.find_dydx_card_for_assignee(source_card_id, assignee_id)
-            return existing
-        
-        if not skip_duplicate_check:
+
+        # Acquire per-assignee creation lock BEFORE any duplicate check or
+        # card creation.  This serialises concurrent threads that both try
+        # to create a card for the same (source_card_id, assignee_id) pair
+        # (e.g. two rapid card.move webhooks or a webhook + listener fire).
+        creation_lock = self._get_creation_lock(source_card_id, assignee_id)
+        acquired = creation_lock.acquire(blocking=True, timeout=60)
+        if not acquired:
+            logger.warning(f"MM card {source_card_id}: timed out waiting for creation lock (assignee {assignee_id})")
+            return None
+
+        try:
+            # --- DUPLICATE CHECK (inside lock so only one thread proceeds) ---
+            if self._was_recently_created(source_card_id, assignee_id, final_target_phase):
+                existing = self.find_dydx_card_for_assignee(source_card_id, assignee_id)
+                if existing:
+                    logger.info(
+                        f"MM card {source_card_id}: skipping creation for assignee {assignee_id} "
+                        f"— created within cooldown, returning existing DYDX card {existing['id']}"
+                    )
+                    return existing
+                # Card was created very recently but the board scan can't find it yet
+                # (Pipefy eventual consistency — new cards may not appear in a paginated
+                # scan for several seconds).  Trust the cooldown record over the stale
+                # board scan and skip creation to prevent a duplicate.
+                logger.warning(
+                    f"MM card {source_card_id}: creation cooldown active for assignee {assignee_id} "
+                    f"but card not found in board scan (Pipefy eventual consistency?) — "
+                    f"skipping creation to prevent duplicate"
+                )
+                return None
+
+            # Always query the DYDX board for an existing card — even when called
+            # from sync_assignees_to_dydx which already diffed the cache.  A
+            # concurrent thread may have just created it between the diff and now.
             existing_card = self.find_dydx_card_for_assignee(source_card_id, assignee_id)
             if existing_card:
-                raise ValueError(
-                    f"DYDX card already exists for source card {source_card_id} "
-                    f"(assignee {assignee_id}) → existing DYDX card {existing_card['id']}. "
-                    f"No new card created."
+                logger.info(
+                    f"MM card {source_card_id}: DYDX card {existing_card['id']} already exists "
+                    f"for assignee {assignee_id} — skipping creation"
                 )
-        
-        dydx_assignee_id, dydx_assignee_name = self._resolve_dydx_assignee(source_card, assignee_id)
-        if not dydx_assignee_id:
-            logger.warning(f"MM card {source_card_id}: could not resolve DYDX assignee from source assignee {assignee_id}")
-            return None
-        
-        # ---- Build DYDX card fields ----
-        
-        # Get description
-        desc = self._get_description_from_card(source_card, field_values, board_type)
-        
-        # Get due date
-        date_val = self.get_source_due_date(source_card, field_values)
-        
-        # Build the title with [{Type}] prefix and assignee name suffix
-        title = self._build_card_title(source_card, field_values, board_type)
-        title = f"{title} - {dydx_assignee_name}"
-        
-        # Build project name
-        project_name = self._build_project_name(source_card, field_values)
+                return existing_card
 
-        priority_value = self._get_priority_label_id_from_source(source_card)
-        
-        # Use the Mediamark card's creation date for date_added_to_board
-        source_created_at = source_card.get('createdAt', '')
-        if source_created_at:
-            date_added_to_board = source_created_at.replace('Z', '').split('.')[0]
-        else:
-            date_added_to_board = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+            # ---- Build and create the DYDX card ----
 
-        # Assemble field values for DYDX card.
-        # 'assignee' must be in fields_attributes because the DYDX board
-        # marks it as a required start-form field. Card-level assignees
-        # are set atomically via the assignee_ids param on createCard,
-        # so there is no separate set_card_assignees call and no churn.
-        dydx_fields = [
-            {'field_id': 'task_name', 'field_value': title},
-            {'field_id': 'priority', 'field_value': str(priority_value) if priority_value else '315707448'},
-            {'field_id': DYDX_ASSIGNEE, 'field_value': str(dydx_assignee_id)},
-            {'field_id': 'partner', 'field_value': str(self.default_partner)},
-            {'field_id': 'date_added_to_board', 'field_value': date_added_to_board},
-            {'field_id': 'main_task_id', 'field_value': str(source_card_id)},
-            {'field_id': 'client_name', 'field_value': HARDCODED_CLIENT_NAME},
-            {'field_id': 'system_type', 'field_value': HARDCODED_SYSTEM_TYPE},
-            {'field_id': 'project_name', 'field_value': project_name},
-        ]
-        
-        if desc:
-            dydx_fields.append({'field_id': 'task_description', 'field_value': desc})
+            dydx_assignee_id, dydx_assignee_name = self._resolve_dydx_assignee(source_card, assignee_id)
+            if not dydx_assignee_id:
+                logger.warning(f"MM card {source_card_id}: could not resolve DYDX assignee from source assignee {assignee_id}")
+                return None
 
-        if source_card.get('url'):
-            dydx_fields.append({'field_id': 'main_task_link', 'field_value': f"### [Open Task]({source_card['url']})"})
+            # Get description
+            desc = self._get_description_from_card(source_card, field_values, board_type)
 
-        # Set due_date and estimated_completion_date via fields_attributes
-        # only. Do NOT also pass due_date as the mutation parameter —
-        # that would set it twice and Pipefy logs each as a separate
-        # "updated Due Date" activity entry.
-        if date_val:
-            clean_date = date_val.replace('Z', '')
-            dydx_fields.append({'field_id': 'due_date', 'field_value': clean_date})
-            dydx_fields.append({'field_id': 'estimated_completion_date', 'field_value': clean_date})
+            # Get due date
+            date_val = self.get_source_due_date(source_card, field_values)
 
-        if current_phase_name:
-            dydx_fields.append({'field_id': 'main_task_status_name', 'field_value': current_phase_name})
-        if current_phase_id:
-            dydx_fields.append({'field_id': 'main_task_status_id', 'field_value': current_phase_id})
-        
-        logger.info(
-            f"Creating DYDX card for MM card {source_card_id} | "
-            f"assignee_id={dydx_assignee_id!r}, assignee_name={dydx_assignee_name!r}, "
-            f"title='{title}', due_date={date_val}, "
-            f"fields={json.dumps(dydx_fields, default=str)}"
-        )
-        result = self.dydx_client.create_card(
-            self.dydx_pipe_id, 
-            title, 
-            dydx_fields,
-            assignee_ids=[str(dydx_assignee_id)]
-        )
-        new_card = result['data']['createCard']['card']
-        logger.info(f"Created DYDX card {new_card['id']} for MM card {source_card_id} (assignee={dydx_assignee_name}, phase={final_target_phase})")
-        
-        self._record_creation(source_card_id, assignee_id, final_target_phase)
-        self._add_to_card_cache(source_card_id, new_card, dydx_assignee_id)
-        
-        # Card-level assignees are set atomically via assignee_ids in the
-        # createCard mutation above. Do NOT call set_card_assignees here —
-        # that would REPLACE all assignees causing a remove+add cycle.
-        
-        # Set labels (priority + on-hold if applicable)
-        try:
-            labels = self.get_combined_labels(source_card, field_values, source_phase=current_phase_name)
-            if labels:
-                self._set_card_labels(new_card['id'], labels)
-        except Exception as e:
-            logger.warning(f"Failed to set labels on new DYDX card {new_card['id']}: {e}")
-        
-        if final_target_phase:
-            target_phase_id = self.dydx_phases.get(final_target_phase.lower())
-            if target_phase_id:
-                try:
-                    self.dydx_client.move_card_to_phase(new_card['id'], target_phase_id)
-                except Exception as e:
-                    if "already in the destination phase" not in str(e):
-                        logger.warning(f"Failed to move new DYDX card {new_card['id']} (MM card {source_card_id}): {e}")
-        
-        return new_card
+            # Build the title with [{Type}] prefix and assignee name suffix
+            title = self._build_card_title(source_card, field_values, board_type)
+            title = f"{title} - {dydx_assignee_name}"
+
+            # Build project name
+            project_name = self._build_project_name(source_card, field_values)
+
+            priority_value = self._get_priority_label_id_from_source(source_card)
+
+            # Use the Mediamark card's creation date for date_added_to_board
+            source_created_at = source_card.get('createdAt', '')
+            if source_created_at:
+                date_added_to_board = source_created_at.replace('Z', '').split('.')[0]
+            else:
+                date_added_to_board = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+
+            # Assemble field values for DYDX card.
+            # 'assignee' must be in fields_attributes because the DYDX board
+            # marks it as a required start-form field. Card-level assignees
+            # are set atomically via the assignee_ids param on createCard,
+            # so there is no separate set_card_assignees call and no churn.
+            dydx_fields = [
+                {'field_id': 'task_name', 'field_value': title},
+                {'field_id': 'priority', 'field_value': str(priority_value) if priority_value else '315707448'},
+                {'field_id': DYDX_ASSIGNEE, 'field_value': str(dydx_assignee_id)},
+                {'field_id': 'partner', 'field_value': str(self.default_partner)},
+                {'field_id': 'date_added_to_board', 'field_value': date_added_to_board},
+                {'field_id': 'main_task_id', 'field_value': str(source_card_id)},
+                {'field_id': 'client_name', 'field_value': HARDCODED_CLIENT_NAME},
+                {'field_id': 'system_type', 'field_value': HARDCODED_SYSTEM_TYPE},
+                {'field_id': 'project_name', 'field_value': project_name},
+            ]
+
+            if desc:
+                dydx_fields.append({'field_id': 'task_description', 'field_value': desc})
+
+            if source_card.get('url'):
+                dydx_fields.append({'field_id': 'main_task_link', 'field_value': f"### [Open Task]({source_card['url']})"})
+
+            # Set due_date and estimated_completion_date via fields_attributes
+            # only. Do NOT also pass due_date as the mutation parameter —
+            # that would set it twice and Pipefy logs each as a separate
+            # "updated Due Date" activity entry.
+            if date_val:
+                clean_date = date_val.replace('Z', '')
+                dydx_fields.append({'field_id': 'due_date', 'field_value': clean_date})
+                dydx_fields.append({'field_id': 'estimated_completion_date', 'field_value': clean_date})
+
+            if current_phase_name:
+                dydx_fields.append({'field_id': 'main_task_status_name', 'field_value': current_phase_name})
+            if current_phase_id:
+                dydx_fields.append({'field_id': 'main_task_status_id', 'field_value': current_phase_id})
+
+            logger.info(
+                f"Creating DYDX card for MM card {source_card_id} | "
+                f"assignee_id={dydx_assignee_id!r}, assignee_name={dydx_assignee_name!r}, "
+                f"title='{title}', due_date={date_val}, "
+                f"fields={json.dumps(dydx_fields, default=str)}"
+            )
+            result = self.dydx_client.create_card(
+                self.dydx_pipe_id,
+                title,
+                dydx_fields,
+                assignee_ids=[str(dydx_assignee_id)]
+            )
+            new_card = result['data']['createCard']['card']
+            logger.info(f"Created DYDX card {new_card['id']} for MM card {source_card_id} (assignee={dydx_assignee_name}, phase={final_target_phase})")
+
+            self._record_creation(source_card_id, assignee_id, final_target_phase)
+            self._add_to_card_cache(source_card_id, new_card, dydx_assignee_id)
+
+            # Card-level assignees are set atomically via assignee_ids in the
+            # createCard mutation above. Do NOT call set_card_assignees here —
+            # that would REPLACE all assignees causing a remove+add cycle.
+
+            # Set labels (priority + on-hold if applicable)
+            try:
+                labels = self.get_combined_labels(source_card, field_values, source_phase=current_phase_name)
+                if labels:
+                    self._set_card_labels(new_card['id'], labels)
+            except Exception as e:
+                logger.warning(f"Failed to set labels on new DYDX card {new_card['id']}: {e}")
+
+            if final_target_phase:
+                target_phase_id = self.dydx_phases.get(final_target_phase.lower())
+                if target_phase_id:
+                    try:
+                        self.dydx_client.move_card_to_phase(new_card['id'], target_phase_id)
+                    except Exception as e:
+                        if "already in the destination phase" not in str(e):
+                            logger.warning(f"Failed to move new DYDX card {new_card['id']} (MM card {source_card_id}): {e}")
+
+            return new_card
+        finally:
+            creation_lock.release()
 
     def close_dydx_card(self, dydx_card_id: str, source_card: Dict = None, dydx_card_data: Dict = None) -> bool:
         """Close a DYDX card by moving it to the Done phase."""
@@ -1660,9 +1714,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 f"remaining={current_assignee_ids & existing_assignee_ids}"
             )
         
-            # Create cards for new assignees (skip redundant duplicate scan — already checked above)
+            # Create cards for new assignees
             for assignee_id in new_assignees:
-                new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase, skip_duplicate_check=True)
+                new_card = self.create_dydx_card_for_assignee(source_card, board_type, assignee_id, correct_dydx_phase)
                 if new_card and new_card.get('id'):
                     result['created'].append(new_card['id'])
                 else:
