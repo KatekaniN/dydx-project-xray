@@ -80,6 +80,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             raise ValueError(
                 " DYDX_DEV_TASKS_PIPE_ID not found!\n"
             )
+        self.mediamark_support_pipe_id = os.getenv('MEDIAMARK_SUPPORT_BOARD_PIPE_ID')
         
         # Fetch board structure from DYDX
         self.dydx_phases = self._fetch_dydx_phases()
@@ -93,6 +94,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         self.dydx_user_ids = {u['id'] for u in self.dydx_users_by_email.values() if u.get('id')}
         self.dydx_pipe_members_by_email = self._fetch_dydx_pipe_members_by_email()
         self.dydx_pipe_member_ids = {u['id'] for u in self.dydx_pipe_members_by_email.values() if u.get('id')}
+        self.mediamark_pipe_members_by_id = self._fetch_mediamark_pipe_members_by_id()
 
         fallback_email = os.getenv('DYDX_ASSIGNEE_FALLBACK_EMAIL', self.FALLBACK_ASSIGNEE_EMAIL).strip().lower()
         fallback_info = self.dydx_pipe_members_by_email.get(fallback_email) or self.dydx_users_by_email.get(fallback_email)
@@ -606,6 +608,66 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         except Exception as e:
             logger.warning(f"Failed to fetch DYDX pipe members: {e}")
             return {}
+
+    def _fetch_mediamark_pipe_members_by_id(self) -> Dict[str, Dict[str, str]]:
+        """Fetch Mediamark board members and build lookup by source-board user ID."""
+        if not self.mediamark_support_pipe_id:
+            return {}
+        try:
+            query = """
+            query GetPipeMembers($pipeId: ID!) {
+                pipe(id: $pipeId) {
+                    members {
+                        user { id name email }
+                    }
+                }
+            }
+            """
+            result = self.mediamark_client.execute_query(query, {'pipeId': self.mediamark_support_pipe_id})
+            members = result.get('data', {}).get('pipe', {}).get('members', [])
+            by_id: Dict[str, Dict[str, str]] = {}
+            for member in members:
+                user = member.get('user', {})
+                user_id = str(user.get('id') or '').strip()
+                if user_id:
+                    by_id[user_id] = {
+                        'id': user_id,
+                        'name': user.get('name') or f"User-{user_id}",
+                        'email': (user.get('email') or '').strip().lower(),
+                    }
+            return by_id
+        except Exception as e:
+            logger.warning(f"Failed to fetch Mediamark pipe members: {e}")
+            return {}
+
+    def _refresh_dydx_member_lookups(self) -> None:
+        """Refresh DYDX user/member lookups after board membership changes."""
+        self.dydx_users_by_email = self._fetch_dydx_users_by_email()
+        self.dydx_user_ids = {u['id'] for u in self.dydx_users_by_email.values() if u.get('id')}
+        self.dydx_pipe_members_by_email = self._fetch_dydx_pipe_members_by_email()
+        self.dydx_pipe_member_ids = {u['id'] for u in self.dydx_pipe_members_by_email.values() if u.get('id')}
+
+    def _refresh_mediamark_member_lookup(self) -> None:
+        """Refresh Mediamark board-member lookup after source-board membership changes."""
+        self.mediamark_pipe_members_by_id = self._fetch_mediamark_pipe_members_by_id()
+
+    @staticmethod
+    def _normalize_person_name(name: str) -> str:
+        """Normalize display names for exact cross-board matching."""
+        return re.sub(r"\s+", " ", str(name or '').strip().lower())
+
+    def _find_dydx_member_by_name(self, source_name: str) -> Optional[Tuple[str, str]]:
+        """Find a unique DYDX board member by exact normalized display name."""
+        target = self._normalize_person_name(source_name)
+        if not target:
+            return None
+        matches = []
+        for info in self.dydx_pipe_members_by_email.values():
+            if self._normalize_person_name(info.get('name')) == target:
+                matches.append((info.get('id'), info.get('name') or source_name))
+        if len(matches) == 1:
+            return matches[0]
+        return None
     
     # ============================================
     # MEDIAMARK-SPECIFIC: Request Type, Title, Description, Project Name
@@ -1078,6 +1140,7 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             return source_assignee_id, f"User-{source_assignee_id}"
 
         emails_to_try: List[str] = []
+        source_names_to_try: List[str] = []
         matched_source_assignee = False
 
         # Otherwise, map Mediamark assignee -> email -> DYDX board member.
@@ -1085,6 +1148,9 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
             if str(assignee.get('id') or '') != source_assignee_id:
                 continue
             matched_source_assignee = True
+            name = (assignee.get('name') or '').strip()
+            if name:
+                source_names_to_try.append(name)
             email = (assignee.get('email') or '').strip().lower()
             if email:
                 emails_to_try.append(email)
@@ -1094,9 +1160,24 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
         if not matched_source_assignee:
             creator = source_card.get('createdBy', {})
             if str(creator.get('id', '')) == source_assignee_id:
+                name = (creator.get('name') or '').strip()
+                if name:
+                    source_names_to_try.append(name)
                 email = (creator.get('email') or '').strip().lower()
                 if email:
                     emails_to_try.append(email)
+
+        if not matched_source_assignee:
+            member_info = self.mediamark_pipe_members_by_id.get(source_assignee_id)
+            if not member_info:
+                self._refresh_mediamark_member_lookup()
+                member_info = self.mediamark_pipe_members_by_id.get(source_assignee_id)
+            if member_info:
+                matched_source_assignee = True
+                if member_info.get('name'):
+                    source_names_to_try.append(member_info['name'])
+                if member_info.get('email'):
+                    emails_to_try.append(member_info['email'])
 
         # Fallback source for assignee email: Work Email / Email fields on the card.
         # Only use this when no explicit source assignee object was matched.
@@ -1116,16 +1197,43 @@ Mediamark phases: NEW, REVIEW, ESCALATED, SOW and Scoping, CLIENT APPROVAL, BACK
                 matches = re.findall(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", text)
                 emails_to_try.extend(matches)
 
-        seen: Set[str] = set()
-        for email in emails_to_try:
-            if not email or email in seen:
+        def try_resolve_by_email() -> Optional[Tuple[str, str]]:
+            seen: Set[str] = set()
+            for email in emails_to_try:
+                if not email or email in seen:
+                    continue
+                seen.add(email)
+                if email in self.dydx_pipe_members_by_email:
+                    info = self.dydx_pipe_members_by_email[email]
+                    return info['id'], info['name']
+            return None
+
+        resolved = try_resolve_by_email()
+        if resolved:
+            return resolved
+
+        if emails_to_try:
+            self._refresh_dydx_member_lookups()
+            resolved = try_resolve_by_email()
+            if resolved:
+                return resolved
+
+        seen_names: Set[str] = set()
+        for source_name in source_names_to_try:
+            normalized_name = self._normalize_person_name(source_name)
+            if not normalized_name or normalized_name in seen_names:
                 continue
-            seen.add(email)
-            if email in self.dydx_pipe_members_by_email:
-                info = self.dydx_pipe_members_by_email[email]
-                return info['id'], info['name']
+            seen_names.add(normalized_name)
+            resolved = self._find_dydx_member_by_name(source_name)
+            if resolved:
+                return resolved
 
         if self.fallback_assignee_id:
+            logger.warning(
+                f"Could not resolve DYDX assignee for MM assignee {source_assignee_id}; "
+                f"emails_tried={emails_to_try}, names_tried={source_names_to_try}. "
+                f"Using fallback {self.fallback_assignee_name}."
+            )
             return self.fallback_assignee_id, self.fallback_assignee_name
         return None, ''
 
